@@ -128,7 +128,7 @@ class _TwitchChat:
 
             X = [msg.message]
             sequences = self.tokenizer.texts_to_sequences(X)
-            sequences = pad_sequences(sequences, padding='post', maxlen=self.tokenizer.num_words)
+            sequences = pad_sequences(sequences, padding='post', maxlen=self.tokenizer.num_words, truncating='post', maxlen=self.MAX_LEN)
             #sequencesChar = self.tokenizerChar.texts_to_sequences(X)
             #sequencesChar = pad_sequences(sequencesChar, padding='post', maxlen=self.maxLenChar)
             sequencesFreq = self.cv.transform(X).toarray()
@@ -186,7 +186,7 @@ class _TwitchChat:
         elif self.mode == MODE_READ:
             X = [msg.text]
             sequences = self.tokenizer.texts_to_sequences(X)
-            sequences = pad_sequences(sequences, padding='post', maxlen=self.tokenizer.num_words)
+            sequences = pad_sequences(sequences, padding='post', truncating='post', maxlen=self.MAX_LEN)
             #sequencesChar = self.tokenizerChar.texts_to_sequences(X)
             #sequencesChar = pad_sequences(sequencesChar, padding='post', maxlen=self.maxLenChar)
             #sequencesFreq = self.cv.transform(X).toarray()
@@ -208,7 +208,7 @@ class _TwitchChat:
                 #print(values[np.argmax(values)])
                 #print(values)
                 
-                if max(values) > .5:#np.argmax(values) == 0:
+                if max(values) > .5:#np.argmax(values) == 0:maxLen
                     self.j += 1
                     f = self.j/self.i
                     print(f'ratio: {self.j} / {self.i} = {f}. s: {s}. {msg.text}')

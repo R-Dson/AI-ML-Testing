@@ -167,7 +167,7 @@ def trainModel(data, value, tokenizer, maxLen, num, tokenizerChar, maxLenChar, n
             #model = models.improved_model(tokenizer.num_words, numChar, cvNum, maxLen, maxLenChar, len(cv.vocabulary_))
             longestlen = len(max(tokenizer.word_docs, key=len))
             #model = t.TransformerModel(longestlen, tokenizer.num_words, num_transformer_blocks, d_model, num_heads, dff)
-            model = t.TransformerModel(longestlen, vocab_size, embed_dim, num_heads, ff_dim, 1)
+            model = t.TransformerModel(maxLen, vocab_size, embed_dim, num_heads, ff_dim, 1)
 
 
             #model.compile(loss='categorical_crossentropy',
@@ -265,7 +265,8 @@ def start():
 
     tokenizer = Tokenizer(oov_token="<OOV>", filters='', num_words=2500)
     extra, maxLen, num, longestTokenizer, tokenizerCharLongest, maxLenChar, numChar, cvNum, cv = extraFiles(tokenizer)
-    
+    maxLen = 0
+    longest = 0
     for i in range(len(listBanned)):
         allowedF = getDataFromPath(BANNED_PATH + listBanned[i], CHAT_PATH + listChat[i])
 
@@ -274,11 +275,16 @@ def start():
         tokenizer.fit_on_texts(allowedF.text)
         sequences = tokenizer.texts_to_sequences(allowedF.text)
         #longest = max(sequences, key=len)
-        if tokenizer.document_count > maxLen:
-            maxLen = tokenizer.document_count
+        if tokenizer.document_count > longest:
+            longest = tokenizer.document_count
             longestTokenizer = tokenizer
         if len(sequences) > num:
             num = len(sequences)
+
+        tempmaxlen = len(max([x.split() for x in allowedF.text], key=len))
+        #print(str(tempmaxlen) + ' vs ' + str(maxLen))
+        if tempmaxlen > maxLen:
+            maxLen = tempmaxlen
         
         """
         tokenizerChar = Tokenizer(oov_token="OOV", lower=True, char_level=True, filters='', )
