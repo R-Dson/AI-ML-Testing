@@ -5,15 +5,10 @@ from twitchAPI.chat import Chat, EventData, ChatMessage, MessageDeletedEvent, Cl
 from datetime import date
 import numpy as np
 #from keras.preprocessing.sequence import pad_sequences
-from torch.nn.utils.rnn import pad_sequence
 import asyncio
-import torch
 import random
-#from keras.utils import pad_sequences
-#from tensorflow import keras
-#from transformers import AutoTokenizer
-#from torch.utils.data import Dataset, DataLoader
-
+from transformers import AutoTokenizer
+from tensorflow import keras
 
 USER_SCOPE = [AuthScope.CHAT_READ, AuthScope.CHAT_EDIT]
 lang = {}
@@ -31,7 +26,6 @@ class twitchBot:
     def __init__(self, id, secret, model, mode=MODE_READ, min=30):
         self.id = id
         self.secret = secret
-        self.model = model
         if mode == MODE_SAVE:
             print('test')
             #asyncio.run(self.func(0, 0, 0, 0, 0, 0, 0, 0,0, model, mode, min))
@@ -47,7 +41,6 @@ class twitchBot:
 
         while True:
             if mode == MODE_READ:
-                print('start')
                 await tc.start()
             elif mode == MODE_SAVE:
                 await tc.start(saveMessages=True, saveDelete=True)
@@ -61,12 +54,15 @@ class _TwitchChat:
         self.i = 0
         self.j = 0
 
+        self.correct = 0
+        self.wrong = 0
+
         if mode == MODE_SAVE:
             pass
         
         elif mode == MODE_READ:
             self.MAX_LEN = MAX_LEN
-            self.tokenizer = tokenizer
+            self.tokenizer = newTokenizer
             self.tokenizerLang = tokenizerLang
             self.model = model
             self.sequencesChar = sequencesChar
@@ -139,39 +135,17 @@ class _TwitchChat:
             self.writeToFile("banned.txt", msg.message, msg.room.name, prefix='banned/')
 
         elif self.mode == MODE_READ:
-            z = []
-            ans = self.tokenizer.encode(msg.message)
-            for x in ans:
-                z.append(x+1)
-            #ans = torch.Tensor([z]).int()
-            MAXLEN=64
-            ans = z
-            L = len(ans)
-    
-            if L >= MAXLEN:
-                ans = ans[:MAXLEN]
-            else:
-                ans.extend([0] * (MAXLEN - L))
-            sequences = torch.Tensor([ans]).int()
-            """
+
             X = [msg.message]
-            #sequences = self.tokenizer(X, padding='max_length', max_length=512, truncation=True)
-            ans = self.tokenizer.encode_batch(X)
-            z = []
-            for x in ans:
-                z.append([l+1 for l in x])
-            ans = z
-            sequences = pad_sequence(ans, batch_first=True)
-            MAXLEN=512
-            sequences = [ans]"""# pad_sequences(ans, padding='post', maxlen=MAXLEN)
-            #inputs = np.array(sequences['input_ids'])
+            sequences = newTokenizer(X, padding = 'max_length')
+            sequences = np.array(sequences.data['input_ids'])
             #sequences = self.tokenizer.texts_to_sequences(X)
             #sequences = pad_sequences(sequences, padding='post', truncating='post', maxlen=self.MAX_LEN)
             #sequencesChar = self.tokenizerChar.texts_to_sequences(X)
             #sequencesChar = pad_sequences(sequencesChar, padding='post', maxlen=self.maxLenChar)
             #sequencesFreq = self.cv.transform(X).toarray()
 
-            #inputs = sequencesFreq#[sequences, sequencesFreq]
+            inputs = sequences#sequencesFreq#[sequences, sequencesFreq]
 
             """
         
@@ -193,15 +167,16 @@ class _TwitchChat:
             
             
             try:
-                #s = self.model.predict(sequences, verbose=False)
-                s = self.model(sequences)
-                values = s.item()#[0]
-                print(values)
-                if values < .5:
-                    print(f'not deleted: {msg.message}')
+                s = self.model.predict(inputs, verbose=False)
+                values = s[0]
+                if np.argmax(values) == 1:
+                    self.wrong = self.wrong + 1
+                    print(f'{self.wrong} Not deleted: {msg.message}')
                     return
                 else:
-                    print(f'{msg.message} : {s}')
+                    self.correct = self.correct + 1
+                    print(f'{self.correct} Correct deleted: {msg.message}')
+                    #print(f'{msg.message} : {s}')
             except:
                 print(('Error predicting: {msg.message}'))
 
@@ -224,77 +199,39 @@ class _TwitchChat:
                 self.writeToFile("chat.txt", msg.text, msg.room.name, prefix='chat/')
 
         elif self.mode == MODE_READ:
-            #X = [msg.text]
+            X = [msg.text]
             #sequences = self.tokenizer.texts_to_sequences(X)
             #sequences = pad_sequences(sequences, padding='post', truncating='post', maxlen=self.MAX_LEN)
             #sequencesChar = self.tokenizerChar.texts_to_sequences(X)
             #sequencesChar = pad_sequences(sequencesChar, padding='post', maxlen=self.maxLenChar)
             #sequencesFreq = self.cv.transform(X).toarray()
-            #sequences = self.tokenizer(X, padding='max_length', max_length=512, truncation=True)
-            z = []
-            ans = self.tokenizer.encode(msg.text)
-            for x in ans:
-                z.append(x+1)
-            #ans = torch.Tensor([z]).int()
-            MAXLEN=64
-            ans = z
-            L = len(ans)
-    
-            if L >= MAXLEN:
-                ans = ans[:MAXLEN]
-            else:
-                ans.extend([0] * (MAXLEN - L))
-            sequences = torch.Tensor([ans]).int() #pad_sequence(ans, batch_first=True)
-            #sequences = sequences[0][:, :MAXLEN]
-            #ans = [x+1 for x in ans]
-            #sequences = pad_sequence(sequences, batch_first=True)#pad_sequences([ans], padding='post', maxlen=MAXLEN, truncating='post')
-            #loader = DataLoader(list(sequences), batch_size=1)
-            
-            #ans = [ans]
-            #z = []
-            #for x in ans:
-            #    z.append(x+1)
-            #ans = z
-            #inputs = np.array(sequences['input_ids'])#[sequences, sequencesFreq]#sequencesChar, 
-
+            #sequences = newTokenizer(X, padding = 'max_length')
+            #sequences = np.array(sequences.data['input_ids'])
+            sequences = newTokenizer(X, padding='max_length', max_length=512, truncation=True)
+            sequences = np.array(sequences['input_ids'])
+            inputs = sequences#[sequences, sequencesFreq]#sequencesChar, 
+            #print(inputs)
             try:
-                #values = self.model.pred(torch.tensor(sequences).to('cuda'))
-                values = self.model(sequences)
-                #print(values)
+                s = self.model.predict(inputs, verbose=False)
+                #print(s)
+                values = s[0]
+                #ind = np.array(values).argmax()
                 self.i += 1
-                values = values.item()
+                #if max(values) > 0.11:
+                #print(max(values))
+
+                #if max(values) < 0.5:
+                    #if max(values) > 0.1:
+                        #print(max(values))
+                #    return
+                #print(values[np.argmax(values)])
                 #print(values)
-                if values >= .5:#np.argmax(values) == 0:
+                
+                if max(values) > .5:#np.argmax(values) == 0:
                     self.j += 1
                     f = self.j/self.i
-                    #print(f'ratio: {self.j} / {self.i} = {f}. s: {values}. {msg.text}')
-
-                return
-                #t = torch.tensor(sequences)
-                for x in loader:
-                    x = x.to('cuda')
-                    s = self.model.predict(x)
-                    #print(s)
-                    values = s#.item()
-                    #ind = np.array(values).argmax()
-                    self.i += 1
-                    #if max(values) > 0.11:
-                    #print(max(values))
-
-                    #if max(values) < 0.5:
-                        #if max(values) > 0.1:
-                            #print(max(values))
-                    #    return
-                    #print(values[np.argmax(values)])
-                    #print(values)
-                    print(values)
-                    if values > .5:#np.argmax(values) == 0:
-                        self.j += 1
-                        f = self.j/self.i
-                        print(f'ratio: {self.j} / {self.i} = {f}. s: {s}. {msg.text}')
-            
-            except Exception as e: 
-                print(e)
+                    print(f'ratio: {self.j} / {self.i} = {f}. s: {s}. {msg.text}')
+            except:
                 print('Error predicting: ' + msg.text)
                 
             return
@@ -383,3 +320,19 @@ class _TwitchChat:
         print('auth2')
         token, refresh_token = await auth.authenticate()
         await self.twitch.set_user_authentication(token, USER_SCOPE, refresh_token)
+
+async def test ():
+  try:
+      model = keras.models.load_model('./model')
+      print('continue')
+      t = twitchBot('', '', model, min=30)
+      print('continue')
+      
+      await (t.func(0, 0, newTokenizer, 0, None, 0, 0, 0, None, model, MODE_READ, min))
+      #asyncio.run(t.func(0, 0, newTokenizer, 0, 0, 0, 0, 0, 0, model, 'READ', min))
+  except:
+      print('fail')
+#await test()
+checkpoint = 'Epidot/TwitchLeagueBert-1000k'#'bert-base-uncased'
+newTokenizer = AutoTokenizer.from_pretrained(checkpoint)
+asyncio.run(test())

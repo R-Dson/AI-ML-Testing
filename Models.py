@@ -243,6 +243,7 @@ def modelTextAlt(num, numChar, cvNum, maxLen, maxLenChar, maxVocLen):
     x = Dense(8*ScaleTest/2)(x)
     x = Activation(tf.nn.relu)(x)
     x = Dropout(0.15)(x)
+    x = AttentionM(maxLen+maxLenChar+maxVocLen)(x)
     x = Dense(2*ScaleTest/2, activation=tf.nn.relu)(x)
     x = Dense(1, activation=tf.nn.sigmoid)(x)
     model = keras.models.Model(inputs=[input1, input3], outputs=x)

@@ -1,5 +1,5 @@
-import Model
-from Model import TEXT, CATEGORY, LANG, NAME, VALUE, ALLOWED
+#import Model
+from Run import TEXT, CATEGORY, LANG, NAME, VALUE, ALLOWED
 
 class File:
     def __init__(self, fileName):
@@ -30,7 +30,8 @@ class File:
                     self.name.append(n)
                     self.value.append(v)
             except:
-                print('failed')
+                pass
+                #print('failed')
 
     def splitExtra(self):
         for line in self.bl:
@@ -47,3 +48,12 @@ class File:
                     self.value.append(ALLOWED)
             except:
                 print('Error loading text.')
+
+    def splitExtraChat(self):
+        return [ x.split(': ')[1][:-1] for x in self.bl]
+        for line in self.bl:
+            lSplit = line.split(': ')
+            try:
+                text = lSplit[1]
+            except:
+                pass

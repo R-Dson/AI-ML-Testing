@@ -5,22 +5,23 @@ from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 import random
 import numpy as np
 from keras.preprocessing.text import Tokenizer, tokenizer_from_json
-#from keras.preprocessing.sequence import pad_sequences
+from keras.utils import pad_sequences
 from keras.models import Sequential, clone_model
 from tqdm.keras import TqdmCallback
 from keras.layers import Dense, Bidirectional, Embedding, LSTM, BatchNormalization, Activation, Layer
 import os
-#from matplotlib import pyplot as plt
-from twitchBot import *
+from matplotlib import pyplot as plt
+#from twitchBot import *
 import Files as files
 import json
 import Models as models
 from sklearn.model_selection import KFold
 import pickle
-#import transformer as t
+import transformer as t
 import wandb
 from wandb.keras import WandbMetricsLogger, WandbModelCheckpoint
-from transformers import AutoTokenizer
+import gensim
+from gensim.models import Word2Vec
 
 TEXT = 0
 CATEGORY = 1
@@ -31,17 +32,16 @@ VALUE = 4
 ALLOWED = 0
 BANNED = 1
 
-MODEL_PATH = './model/model'
-CHAT_PATH = 'data/chat/'
-BANNED_PATH = 'data/banned/'
-EXTRA_DATA = 'data/WikiQA-train.txt'
-JSON_PATH = 'data/usedFiles.json'
-TOKEN_PATH = 'data/tokenizer.pickle'
-TFIDF_PATH = 'data/TFIDF.pickle'
+MODEL_PATH = '/content/drive/MyDrive/DL-NETWORK/model'
+CHAT_PATH = '/content/drive/MyDrive/DL-NETWORK/data/chat/'
+BANNED_PATH = '/content/drive/MyDrive/DL-NETWORK/data/banned/'
+EXTRA_DATA = '/content/drive/MyDrive/DL-NETWORK/data/WikiQA-train.txt'
+JSON_PATH = '/content/drive/MyDrive/DL-NETWORK/data/usedFiles.json'
+TOKEN_PATH = '/content/drive/MyDrive/DL-NETWORK/data/tokenizer.pickle'
+TFIDF_PATH = '/content/drive/MyDrive/DL-NETWORK/data/TFIDF.pickle'
 
 ENOnly = False
-checkpoint = 'bert-base-cased'
-newTokernizer = AutoTokenizer.from_pretrained(checkpoint)
+
 
 
 def getDataFromPath(pathBanned, pathAllowed):
@@ -72,16 +72,16 @@ def trainModel(data, value, tokenizer, maxLen, num, tokenizerChar, maxLenChar, n
     validation_ratio = 0.15
     test_ratio = 0.15
     #print(len(data))
-    X = data
-    y = np.array(value, dtype=np.int32)
+    X = data[:]
+    y = np.array(value[:], dtype=np.int32)
 
     #y = np.array([np.array([0, 1]) if yi == 0 else np.array([1, 0]) for yi in y], dtype=np.int32)
 
     #sequences = tokenizer.texts_to_sequences(X)
-    sequences = newTokernizer(data, padding = True, truncation=True)
-    #maxLen = max([len(seq) for seq in sequences])
-    
-    #sequences = pad_sequences(sequences, padding='post', truncating='post', maxlen=maxLen)
+    sequences = [sentence.lower().split() for sentence in X]
+    sequences = Word2Vec(sequences, vector_size=100, window=5, min_count=1, workers=4)
+
+    #sequences = pad_sequences(sequences, padding='post', maxlen=tokenizer.num_words)
     #sequencesChar = tokenizerChar.texts_to_sequences(X)
     #sequencesChar = pad_sequences(sequencesChar, padding='post', maxlen=maxLenChar)
     sequencesFreq = cv.transform(X).toarray()
@@ -152,10 +152,8 @@ def trainModel(data, value, tokenizer, maxLen, num, tokenizerChar, maxLenChar, n
         history = bestHistory
 
     else:
-        sequences = np.array(sequences.data['input_ids'])
         X_train_text, X_test_text = train_test_split(sequences, test_size=test_ratio/(test_ratio + validation_ratio), random_state=35)
         #X_train_char, X_test_char = train_test_split(sequencesChar, test_size=test_ratio/(test_ratio + validation_ratio), random_state=35)
-        
         X_train_freq, X_test_freq, y_train, y_test = train_test_split(sequencesFreq, y, test_size=test_ratio/(test_ratio + validation_ratio), random_state=35)
 
         X_val_text, X_test_text = train_test_split(X_test_text, test_size=test_ratio/(test_ratio + validation_ratio), random_state=35)
@@ -164,22 +162,18 @@ def trainModel(data, value, tokenizer, maxLen, num, tokenizerChar, maxLenChar, n
         
         print('Loading model...')
         maxlen = tokenizer.num_words
-        maxLen = len(sequences[0])#len(newTokernizer)#len(tokenizer.word_index) + 1
-        ngram_size = len(cv.vocabulary_)
-        vocab_size = newTokernizer.vocab_size - 1
-
-        #vocab_size = ngram_size + vocab_size
+        vocab_size = tokenizer.num_words
         
-        num_heads = 4
-        embed_dim = 32
-        ff_dim = 2 * embed_dim
+        num_heads = 2
+        embed_dim = 10
+        ff_dim = 4 * embed_dim
 
         if model == None:
             print('Generating new model.')
             #model = models.improved_model(tokenizer.num_words, numChar, cvNum, maxLen, maxLenChar, len(cv.vocabulary_))
-            # longestlen = len(max(tokenizer.word_docs, key=len))
+            longestlen = len(max(tokenizer.word_docs, key=len))
             #model = t.TransformerModel(longestlen, tokenizer.num_words, num_transformer_blocks, d_model, num_heads, dff)
-            #model = t.TransformerModel(maxLen, vocab_size, embed_dim, num_heads, ff_dim, 1, rate=config['dropout_rate'])
+            model = t.TransformerModel(longestlen, vocab_size, embed_dim, num_heads, ff_dim, 1, rate=config['dropout_rate'])
 
 
             #model.compile(loss='categorical_crossentropy',
@@ -190,20 +184,20 @@ def trainModel(data, value, tokenizer, maxLen, num, tokenizerChar, maxLenChar, n
                           loss=config['loss'],
                           metrics=[config['metrics']])
 
-            model.build(input_shape=(None, maxLen))
+            model.build(input_shape=(2, vocab_size))
             #model.build(input_shape=((None, maxlen), (None, vocab_size)))
             model.summary()
 
         
-        X_train =  X_train_text#np.concatenate((X_train_text, X_train_freq), axis=1)#[X_train_text, X_train_freq]#X_train_text# [X_train_text,  X_train_freq]#X_train_char, X_train_freq]
-        X_test = X_test_text#np.concatenate((X_test_text, X_test_freq), axis=1)#[X_test_text, X_test_freq]# X_test_text#[X_test_text, X_test_freq] #X_test_char, X_test_freq]
+        X_train = X_train_text# [X_train_text, X_train_freq]# [X_train_text,  X_train_freq]#X_train_char, X_train_freq]
+        X_test = X_test_text#[X_test_text, X_test_freq]# [X_test_text, X_test_freq] #X_test_char, X_test_freq]
         
         model, history = trainOnData(model, X_train, y_train, X_test, y_test)
         #odel, history = trainOnDataTransformer(model, X_train_text, X_train_freq, y_train, X_val_text, X_val_freq, y_val) #(model, X_train, y_train, X_test, y_test)
 
-        X_val = X_val_text#np.concatenate((X_val_text, X_val_freq), axis=1)# [X_val_text, X_val_freq]# X_val_text#X_val_char, X_val_freq]
+        X_val = X_val_text#[X_val_text, X_val_freq]#X_val_char, X_val_freq]
 
-        score = model.evaluate(X_val, y_val, verbose=True)
+        score = model.evaluate(X_val, y_val, verbose=False)
         print("Val score: " + str(score))
         
     return model, history
@@ -216,9 +210,9 @@ def trainOnData(modelTrain, X_train, y_train, X_val, y_val):
             batch_size=config['batch_size'], 
             shuffle=True,
             callbacks=[TqdmCallback(verbose=2), 
-            keras.callbacks.EarlyStopping(monitor='val_loss', patience=3)])#,
-            #WandbMetricsLogger(log_freq=1000),
-            #WandbModelCheckpoint("models")])
+            keras.callbacks.EarlyStopping(monitor='val_loss', patience=3),
+            WandbMetricsLogger(log_freq=1000),
+            WandbModelCheckpoint("models")])
 
     return modelTrain, history
 
@@ -277,28 +271,27 @@ def start():
     listBanned = os.listdir(BANNED_PATH)
     listChat = os.listdir(CHAT_PATH)
 
-    tokenizer = Tokenizer(oov_token="<OOV>", filters='')
+    tokenizer = Tokenizer(oov_token="<OOV>", filters='', num_words=7000)
     extra, maxLen, num, longestTokenizer, tokenizerCharLongest, maxLenChar, numChar, cvNum, cv = extraFiles(tokenizer)
-    maxLen = 0
-    longest = 0
+    
     for i in range(len(listBanned)):
         allowedF = getDataFromPath(BANNED_PATH + listBanned[i], CHAT_PATH + listChat[i])
 
-        tokenizer = Tokenizer(oov_token="<OOV>", filters='')
+        tokenizer = Tokenizer(oov_token="<OOV>", filters='', num_words=7000)
         
         tokenizer.fit_on_texts(allowedF.text)
         sequences = tokenizer.texts_to_sequences(allowedF.text)
         #longest = max(sequences, key=len)
-        if tokenizer.document_count > longest:
-            longest = tokenizer.document_count
+        if tokenizer.document_count > maxLen:
+            maxLen = tokenizer.document_count
             longestTokenizer = tokenizer
         if len(sequences) > num:
             num = len(sequences)
 
-        tempmaxlen = len(max([x.split() for x in allowedF.text], key=len))
-        #print(str(tempmaxlen) + ' vs ' + str(maxLen))
+        tempmaxlen = max(allowedF.text, key=len)
         if tempmaxlen > maxLen:
             maxLen = tempmaxlen
+            print(maxLen)
         
         """
         tokenizerChar = Tokenizer(oov_token="OOV", lower=True, char_level=True, filters='', )
@@ -312,18 +305,18 @@ def start():
         if len(sequencesChar) > numChar:
             numChar = len(longestChar)"""
 
-        cvT = TfidfVectorizer(max_features=300, ngram_range=(1,3))
+        cvT = TfidfVectorizer(max_features=5000, ngram_range=(1,3))
         cvT.fit(allowedF.text)
         inp = cvT.transform(allowedF.text).toarray()
         cvNumT = len(cvT.vocabulary_)#arr.shape[1]
-        #maxlen = 0
+        maxlen = 0
         if cvNumT > cvNum:
-            cvNum = cvNumT#inp.shape[1]
+            cvNum = inp.shape[1]
             cv = cvT
         
     return extra, maxLen, num, None, longestTokenizer, listBanned, listChat, tokenizerCharLongest, maxLenChar, numChar, cvNum, cv
 
-def plot(histories):"""
+def plot(histories):
     ha = []
     hl = []
     hvl = []
@@ -349,7 +342,7 @@ def plot(histories):"""
     plt.ylabel('loss')
     plt.xlabel('epoch')
     plt.legend(['train', 'val'], loc='upper left')
-    plt.show()"""
+    plt.show()
 
 if __name__ == '__main__':
     np.random.seed(1337)
@@ -357,10 +350,10 @@ if __name__ == '__main__':
 
     config = {
             "dropout_rate": random.uniform(0.01, 0.80),
-            "optimizer": "adam",
+            "optimizer": "adamax",
             "loss": "binary_crossentropy",
             "metrics": "accuracy",
-            "epochs": 16,
+            "epochs": 4,
             "batch_size": 128
         }
 
@@ -372,7 +365,7 @@ if __name__ == '__main__':
         
     )
     
-    """"""
+    """
     #os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc'
     os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
     gpus = tf.config.experimental.list_physical_devices('GPU')
@@ -383,7 +376,7 @@ if __name__ == '__main__':
     configP.gpu_options.allow_growth=True
     sess = tf.compat.v1.Session(config=configP)
 
-    tf.compat.v1.keras.backend.set_session(sess)
+    tf.compat.v1.keras.backend.set_session(sess)"""
     
     train = True
 
@@ -421,7 +414,7 @@ if __name__ == '__main__':
         et = list(np.array_split(np.array(extra.text, dtype=object), len(listBanned)))
 
     if train:
-        
+        print('start train')
         history = []
         histories = []
 
@@ -435,7 +428,7 @@ if __name__ == '__main__':
             for i in range(len(listBanned)):#range(2):#
                 tempList = listBanned[0:i+1]
                 tempList.extend(listChat[0:i+1])
-
+                print(str(i))
                 if listBanned[i] not in existing and listChat[i] not in existing:
                     allowedF = getDataFromPath(BANNED_PATH + listBanned[i], CHAT_PATH + listChat[i])
 
@@ -446,10 +439,10 @@ if __name__ == '__main__':
                     n = 20000
                     #length = range(len(allowedF.text))
                     #for chunk in zip(*[iter(length)]*n):
-                    for j in range(n, len(allowedF.text), n):
+                    if True:#for i in range(n, len(allowedF.text), n):
                         #startp = allowedF.text[i]
                         #endp = chunk[-1]
-                        if oldcv == None and oldTokenizer == None:
+                        if oldcv == None and oldTokenizer == None:#[i-n:i]
                             model, historyT = trainModel(allowedF.text, allowedF.value, longestTokenizer, maxLen, num, None, maxLenChar, numChar, cvNum, cv, model)
                         else:
                             model, historyT = trainModel(allowedF.text, allowedF.value, oldTokenizer, maxLen, num, None, maxLenChar, numChar, cvNum, oldcv, model)
@@ -482,6 +475,6 @@ if __name__ == '__main__':
         with open(TFIDF_PATH, 'rb') as handle:
             cv = pickle.load(handle)
 
-    twitchBot('', '', maxLen, longest, longestTokenizer, None, None, tokenizerCharLongest, maxLenChar, numChar, cv, model, min=30)
+    #twitchBot('', '', maxLen, longest, longestTokenizer, None, None, tokenizerCharLongest, maxLenChar, numChar, cv, model, min=30)
     #twitchBot('', '', MAX_LEN=maxLen, maxLenPost=longest, tokenizer=longestTokenizer, cv=cv, model=model)
 
