@@ -1,7 +1,7 @@
 
 # Inspiration from https://github.com/karpathy/nanoGPT
-
 import chess
+
 import math
 import torch
 import torch.nn as nn
@@ -9,11 +9,9 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 import torch.nn as nn
 import torch.optim as optim
+from torch.cuda.amp import GradScaler
 import chess.engine
-from torch.autograd import Variable
 import numpy as np
-from chess.engine import SimpleEngine
-
 
 class CausalSelfAttention(nn.Module):
 
@@ -129,15 +127,15 @@ custom_vocab = {
     ".": 14, "/": 15,
     "1": 16, "2": 17, "3": 18, "4": 19, "5": 20, "6": 21, "7": 22, "8": 23,
     "w": 24, "W": 25, "0": 26, "a": 27, "b": 28, "c": 29, "d": 30, "e": 31, "f": 32, "g": 33, "h": 34,
-    "A": 35, "B": 36, "C": 37, "D": 38, "E": 39, "F": 40, "G": 41, "H": 42,
+    "A": 35, "B": 36, "C": 37, "D": 38, "E": 39, "F": 40, "G": 41, "H": 42, "#": 43
 }
 
 @dataclass
 class GPTConfig:
     block_size: int = 256 #1024
     vocab_size: int = len(valid_move_tokens)
-    n_layer: int = 8
-    n_head: int = 8
+    n_layer: int = 4
+    n_head: int = 4
     n_embd: int = 256 #768
     dropout: float = 0.2
     bias: bool = True
@@ -210,20 +208,22 @@ class ChessGPT(nn.Module):
     def generate(self, fen_input, max_new_tokens, temperature=1.0, top_k=None):
         pass
 
+
 embedding_dim = 32
-embedding_matrix = np.random.rand(len(custom_vocab), embedding_dim)
+embedding_matrix = np.random.rand(len(custom_vocab)+2, embedding_dim)
 
 def fen_to_tensor(fen_string):
     tokens = list(fen_string)
     token_indices = [custom_vocab[token] for token in tokens]
     embeddings = [embedding_matrix[index] for index in token_indices]
 
-    # convert the list of numpy arrays into a single numpy array
+    # Convert the list of numpy arrays into a single numpy array
     embeddings = np.array(embeddings)
 
+    # Create a PyTorch tensor
     tensor = torch.tensor(embeddings)
 
-    sequence_length = 64
+    sequence_length = embeddings.shape[0]
     if tensor.size(0) < sequence_length:
         padding = torch.zeros(sequence_length - tensor.size(0), embedding_dim)
         tensor = torch.cat((tensor, padding))
@@ -235,10 +235,12 @@ def fen_to_tensor(fen_string):
 from stockfish import Stockfish
 
 model = ChessGPT(GPTConfig)
-optimizer = optim.Adam(model.parameters(), lr=6e-4, weight_decay=0.01, betas=(0.9, 0.95))
+scaler = GradScaler()
+optimizer = optim.Adam(model.parameters(), lr=3e-4, weight_decay=0.01, betas=(0.9, 0.95))
+#lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
 
 try:
-    checkpoint = torch.load('model_checkpoint.pth')
+    checkpoint = torch.load('save-path')
 
     # Load model state_dict
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -253,70 +255,329 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 if device == 'cuda':
     print("Using GPU")
 
-model.to(device)
+#model.to(device)
 
 
 epochs = 100
-stockfish = Stockfish("stockfish-path-here")
+stockfish = Stockfish("Stockfish-path")
+stockfish.set_elo_rating(1500)
 penalty = 1.0
+batch_size = 128
 
 totalRounds = []
 
+num_games = 10
+
+def custom_reward_function(game_outcome, legal_move):
+    # Reward based on game outcome
+    if game_outcome == "checkmate":
+        return 1.0  # Positive reward for a checkmate
+    elif game_outcome == "stalemate":
+        return 0.5  # Positive reward for a stalemate (draw)
+    elif game_outcome == "timeout":
+        return -0.5  # Negative reward for running out of time
+    else:
+        return -0.1 if not legal_move else 0.0 # No reward for other cases
+
+def calculate_game_outcome(board):
+    # Check the game outcome (e.g., checkmate, stalemate, timeout)
+    if board.is_checkmate():
+        return "checkmate"
+    elif board.is_stalemate():
+        return "stalemate"
+    elif board.is_insufficient_material():
+        return "insufficient_material"
+    elif board.is_seventyfive_moves():
+        return "seventyfive_moves"
+    else:
+        return "in_progress"
+
 for epoch in range(epochs):
     total_loss = 0.0
+    data = []  # Batch of moves and their outcomes
+    # Initialize chess board
+    attemts = 0
+    failedAttempts = 0
+
+    rounds = 0
+    move = 0
+    predictions_fen = [] 
+    best_move_fen = []
+
+    total_loss = 0.0
+    total_rewards = []
     
+    for game in range(num_games):
+        board = chess.Board()
+        log_probs = []  # Store log probabilities of moves
+        rewards = []    # Store rewards
+        moven = 0
+        attempts = 0
+
+        earlier_moves = []
+        while not board.is_game_over():
+            try:
+                board_fen = board.fen()
+                for earlier_move in earlier_moves:
+                    board_fen += "/" + earlier_move
+                if len(earlier_moves) < 2:
+                    for i in range(2-len(earlier_moves)):
+                        board_fen += "/" + len(board.fen())*"#"#*(4-len(earlier_moves))
+                input_tensor = fen_to_tensor(board_fen)
+            except:
+                break
+            output = model(input_tensor)
+            probabilities = torch.softmax(output, dim=-1)
+            probabilities = probabilities.view(-1, len(valid_move_tokens))
+
+            action = torch.multinomial(probabilities, 1)[0]
+
+            log_prob = torch.log(probabilities[0][action])
+
+            move = valid_move_tokens[action.item()]
+
+            legalmove = True
+            attempts += 1
+            try:
+                move = chess.Move.from_uci(move)
+                if move not in board.legal_moves:
+                    legalmove = False
+            except:
+                legalmove = False
+
+            if legalmove:
+                moven += 1
+                stockfish.reset_engine_parameters()
+                stockfish.set_elo_rating(1500)
+                stockfish.set_fen_position(board.fen())
+                best = stockfish.get_best_move_time(100)
+
+                log_probs.append(log_prob)
+                
+                board.push(move)
+                
+                # Calculate reward based on game outcome (customize this part)
+                game_outcome = calculate_game_outcome(board)
+                reward = custom_reward_function(game_outcome, legalmove)
+                rewards.append(reward)
+                print(f"Game: {game}\tTotal moves: {moven}\tMove: {move.uci()}\tBest move: {best}\t Attempt: {attempts}")
+                print(board)
+                print("---------------------------------------")
+                earlier_moves.append(board.fen())
+                if len(earlier_moves) > 2:
+                    earlier_moves.pop(0)
+
+                # Opponent move
+                moven += 1
+                stockfish.reset_engine_parameters()
+                stockfish.set_elo_rating(1500)
+                stockfish.set_fen_position(board.fen())
+                opmove = stockfish.get_best_move_time(100)
+                
+                board.push(chess.Move.from_uci(opmove))
+                print(f"Game: {game}\tTotal moves: {moven}\tOpponent move: {opmove}")
+                print(board)
+                print("---------------------------------------")
+                earlier_moves.append(board.fen())
+                if len(earlier_moves) > 2:
+                    earlier_moves.pop(0)
+
+                attempts = 0
+            if not legalmove:
+                rewards.append(-1.0)
+
+            #if attempts > 2000:
+                #print("To many attempts, resetting board")
+                #rewards.append(-6.0)
+                #log_probs.append(log_prob)
+                #break
+
+        # Calculate the total reward for the game
+        total_reward = sum(rewards)
+
+        # Compute the policy gradient loss
+        policy_loss = []
+        for log_prob, reward in zip(log_probs, rewards):
+            policy_loss.append(-log_prob * reward)
+        policy_loss = torch.stack(policy_loss).sum()
+
+        # Update the model using the policy gradient loss
+        optimizer.zero_grad()
+        policy_loss.backward()
+        optimizer.step()
+
+        total_loss += policy_loss.item()
+        total_rewards.append(total_reward)
+
+        average_loss = total_loss / num_games
+        average_reward = sum(total_rewards) / num_games
+        print(f"Epoch {epoch+1}/{epochs}, Average Loss: {average_loss:.5f}, Average Reward: {average_reward:.5f}")
+
+    totalRounds.append(rounds)
+    avgl = -1
+    if rounds != 0:
+        avgl = total_loss/rounds
+    print(f"Total Epoch {epoch + 1}\t Loss: {total_loss:.5f}\tRounds: {rounds}")
+    
+    if epoch % 1 == 0:
+        print("Saving checkpoint")
+        torch.save({
+            'model_state_dict': model.state_dict(),  # Save the model's weights
+            'optimizer_state_dict': optimizer.state_dict(),  # Save the optimizer's state
+        }, 'save-path')
+
+print(totalRounds)
+torch.save({
+    'model_state_dict': model.state_dict(),  # Save the model's weights
+    'optimizer_state_dict': optimizer.state_dict(),  # Save the optimizer's state
+}, 'save-path')
+
+"""
+for epoch in range(epochs):
+    total_loss = 0.0
+    data = []  # Batch of moves and their outcomes
     # Initialize chess board
     board = chess.Board()
     attemts = 0
     failedAttempts = 0
 
-    stockfish.reset_engine_parameters()
-    stockfish.set_fen_position(board.fen())
-    best_move = stockfish.get_best_move_time(10)
+    
 
     rounds = 0
     move = 0
+    predictions_fen = [] 
+    best_move_fen = []
+
+    log_probs = []
+    rewards = []
     
     while not board.is_game_over():
         oldBoard = board.copy()
-        
         try:
             input_tensor = fen_to_tensor(board.fen())
         except:
-            # Todo: fix?
             print("Failed to convert fen to tensor")
-            print('---------------------------------------')
-            print('---------------------------------------')
-            print('---------------------------------------')
-            print(board)
-            print('---------------------------------------')
-            print('---------------------------------------')
-            print('---------------------------------------')
             break
-            
-        output = model(input_tensor)
-
-        output = output.view(64, 32, -1)  # Reshape the output
-        temperature = 0.7  # Adjust the temperature
+        
+        temperature = 0.7  
+        
+        with torch.autocast(device_type="cuda"):
+            output = model(input_tensor)
+        output = output.view(64, 32, -1)
         output = output / temperature
 
-        # Applying softmax to get probabilities
         probabilities = torch.softmax(output, dim=-1)
-
         probabilities = probabilities.view(-1, len(valid_move_tokens))
-
-        # Sample move index
         max_prob_indices = torch.argmax(probabilities, dim=-1)
-
-        # Get the highest probability move index
         max_prob_index = max_prob_indices[0].item()
-
-        # Get the corresponding move
         move_predict_uci = valid_move_tokens[max_prob_index]
+        
+        # Best move
+        stockfish.reset_engine_parameters()
+        stockfish.set_elo_rating(1500)
+        stockfish.set_fen_position(board.fen())
+        best = stockfish.get_best_move_time(10)
 
-        loss = 0
+        legalmove = True
+        try:
+            move = chess.Move.from_uci(move_predict_uci)
+            if move not in board.legal_moves:
+                legalmove = False                
+        except:
+            legalmove = False
+        
+        try:
+            move = chess.Move.from_uci(move_predict_uci)
+            oldBoard.push(move)
+            predictions_fen.append(oldBoard.fen())
+            oldBoard.pop() 
+        except: 
+            predictions_fen.append(board.fen()) # Treat as if no change was made
+            
+        oldBoard.push(chess.Move.from_uci(best))
+        best_move_fen.append(oldBoard.fen())
+        oldBoard.pop()
+
+        attemts += 1
+        if legalmove:
+            rounds += 1
+
+            board.push(move)
+            print(f"Total moves: {move}\tMove: {move_predict_uci}\tBest move: {best}")
+            print(board)
+            print("---------------------------------------")
+
+            stockfish.reset_engine_parameters()
+            stockfish.set_elo_rating(1500)
+            stockfish.set_fen_position(board.fen())
+            opmove = stockfish.get_best_move_time(100)
+            board.push(chess.Move.from_uci(opmove))
+            print(f"Total moves: {move}\tOpponent move: {opmove}")
+            print(board)
+            print("---------------------------------------")
+
+        else:
+            failedAttempts += 1
+
+        loss = None
+        if len(predictions_fen) >= batch_size or attemts > 2000:  
+            # Update the model in a batch          
+            loss = 0
+
+            for i in range(len(predictions_fen)):
+                target_predict = fen_to_tensor(predictions_fen[i])  # Predicted output for this move
+                target = fen_to_tensor(best_move_fen[i])  # Target output for this move
+                move_loss = nn.CrossEntropyLoss()(target_predict.float(), target.float())
+                loss += move_loss
+            
+            loss = Variable(loss, requires_grad=True)
+            
+            optimizer.zero_grad()
+            clip_grad_norm_(model.parameters(), max_norm=1.0)
+            loss.backward()
+            optimizer.step()
+
+            predictions_fen = []
+            best_move_fen = []
+
+        if loss is not None:
+            total_loss += loss.item()
+        if attemts % 1000 == 0 and attemts != 0:
+            average_loss = total_loss / attemts
+            print(f"Attempts: {attemts}\tAverage loss/attempt: {average_loss:.5f} \t Failed attempts: {failedAttempts}")
+        if attemts > 2000:
+            print("To many attemts, resetting board")
+            break
+
+    totalRounds.append(rounds)
+    avgl = -1
+    if rounds != 0:
+        avgl = total_loss/rounds
+    print(f"Total Epoch {epoch + 1}\t Loss/round: {avgl:.5f}\tRounds: {rounds}")
+    
+    if epoch % 10 == 0:
+        print("Saving checkpoint")
+        torch.save({
+            'model_state_dict': model.state_dict(),  # Save the model's weights
+            'optimizer_state_dict': optimizer.state_dict(),  # Save the optimizer's state
+        }, '/')
+
+    
+"""
+
+
+        
+"""try:
+            target_predict = fen_to_tensor(board.fen())  # Convert the predicted move board to tensor
+        except:
+            pass
+        
+        oldBoard.push(chess.Move.from_uci(best_move))
+        target = fen_to_tensor(oldBoard.fen())  # Convert the best move to tensor
+        oldBoard.pop()"""
+"""
         legalmove = False
-
+        
         # fails when the move is the same square
         try: 
             legalmove = oldBoard.is_legal(chess.Move.from_uci(move_predict_uci))
@@ -325,65 +586,45 @@ for epoch in range(epochs):
              
         attemts += 1
         if legalmove:
+            data.append((input_tensor, move_predict_uci))
             rounds += 1
             board.push(chess.Move.from_uci(move_predict_uci))
         else:
             loss += penalty
             failedAttempts += 1
+
+        #loss += nn.CrossEntropyLoss()(target_predict.float(), target.float())
+        #loss = Variable(loss, requires_grad = True)
         
-        try:
-            target_predict = fen_to_tensor(board.fen())  # Convert the predicted move board to tensor
-        except:
-            pass
-        oldBoard.push(chess.Move.from_uci(best_move))
-        target = fen_to_tensor(oldBoard.fen())  # Convert the best move to tensor
-        oldBoard.pop()
-
-        loss += nn.CrossEntropyLoss()(target_predict.float(), target.float())
-        loss = Variable(loss, requires_grad = True)
-
+        
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-
+        
         if legalmove:
             move += 1
-            print(move)
+            print(f"Total moves: {move}\tMove: {move_predict_uci}\tBest move: {best_move}")
             print(board)
+            #print(move_predict_uci)
             print("---------------------------------------")
 
-            # opponent move
+            # Enemy move
             stockfish.reset_engine_parameters()
+            stockfish.set_elo_rating(1500)
             stockfish.set_fen_position(board.fen())
             emove = stockfish.get_best_move_time(100)
             board.push(chess.Move.from_uci(emove))
             move += 1
-            print(move)
+            print(f"Total moves: {move}\tOpponent move: {emove}")
             print(board)
             print("---------------------------------------")
             if board.is_game_over():
                 print("Game over")
                 break
             
-            # New best Move
+            # Next best Move
+            stockfish.set_elo_rating(1500)
             stockfish.set_fen_position(board.fen())
-            best_move = stockfish.get_best_move_time(100)
+            best_move = stockfish.get_best_move_time(100)"""
             
-
-        total_loss += loss.item()
-        if attemts % 1000 == 0 and attemts != 0:
-            average_loss = total_loss / attemts
-            print(f"Attempts: {attemts}\tAverage loss/attempt: {average_loss:.5f} \t Failed attempts: {failedAttempts} \tMove: {move_predict_uci}\tBest move: {best_move}")
-        if attemts > 2000:
-            print("To many attemts, resetting board")
-            break
-    totalRounds.append(rounds)
-    avgl = -1
-    if rounds != 0:
-        avgl = total_loss/rounds
-    print(f"Total Epoch {epoch + 1}\t Loss/round: {avgl:.5f}\tRounds: {rounds}")
-print(totalRounds)
-torch.save({
-    'model_state_dict': model.state_dict(),  # Save the model weights
-    'optimizer_state_dict': optimizer.state_dict(),  # Save the optimizer state
-}, 'model_checkpoint.pth')
+        
