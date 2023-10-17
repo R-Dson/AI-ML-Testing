@@ -146,7 +146,7 @@ custom_vocab = {
 
 embedding_dim = 512
 
-stockfish = Stockfish("Stockfish-path")
+stockfish = Stockfish("stockfish-path")
 
 @dataclass
 class GPTConfig:
@@ -194,7 +194,7 @@ class ChessGPT(nn.Module):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
 
         # report number of parameters
-        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        #print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
 
     
     def forward(self, fen):
@@ -245,11 +245,17 @@ class ChessGPT(nn.Module):
     def generate(self, fen_input, max_new_tokens, temperature=1.0, top_k=None):
         pass
 
+
+#np.random.seed(7331) 
+#embedding_matrix = np.random.rand(len(custom_vocab) + 2, embedding_dim * (past + 1))
+
 def uci_to_tensor(uci_string):
     return torch.tensor([uci_to_int[uci_string]]).float()
 
 def fen_to_tensor(fen_string, max_length):
-    if max_length != 0 and len(fen_string) < max_length:
+    if max_length != 0 and len(fen_string) > max_length:
+        fen_string = fen_string[:max_length]
+    elif max_length != 0 and len(fen_string) < max_length:
         padding = "#" * (max_length - len(fen_string))
         fen_string += padding
 
@@ -300,6 +306,8 @@ def update_elo_ratings(player_elo, opponent_elo, game_result, change_opp_elo=Fal
 ctx = multiprocessing.get_context("spawn")
 model_lock = ctx.Lock()
 
+max_length = 64
+
 def run_game(opponent_elo, past, result_queue, central_model, result, ind):
     local_model = ChessGPT(GPTConfig)
     local_model.load_state_dict(central_model.state_dict())
@@ -317,6 +325,7 @@ def run_game(opponent_elo, past, result_queue, central_model, result, ind):
     earlier_moves = []
 
     best_move_fen = []
+    all_logits = []
 
     while not board.is_game_over():
         #print('---------------------------------------')
@@ -327,9 +336,9 @@ def run_game(opponent_elo, past, result_queue, central_model, result, ind):
             for i in range(past-len(earlier_moves)):
                 board_fen += "%" + len(board.fen())*"#"
                     
-        x_fen = fen_to_tensor(board_fen, 0)
-        x_logits = local_model(x_fen.unsqueeze(0)).squeeze(0)
-        x_logits = torch.softmax(x_logits, dim=1)
+        x_fen = fen_to_tensor(board_fen, max_length)
+        x_logits_og = local_model(x_fen.unsqueeze(0)).squeeze(0)
+        x_logits = torch.softmax(x_logits_og, dim=1)
 
         with torch.no_grad():
             action = torch.multinomial(x_logits, 1)[0]
@@ -339,6 +348,8 @@ def run_game(opponent_elo, past, result_queue, central_model, result, ind):
         move = valid_move_tokens[action.item()]
         try:
             move = chess.Move.from_uci(move)
+            if move in board.legal_moves:
+                all_logits.append(x_logits_og.detach().cpu().numpy())
         except:
             move = None
             
@@ -348,17 +359,20 @@ def run_game(opponent_elo, past, result_queue, central_model, result, ind):
                 move = None
                 break
 
-            x_logits = local_model(x_fen.unsqueeze(0)).squeeze(0)
-            x_logits = torch.softmax(x_logits, dim=1)
+            x_logits_og = local_model(x_fen.unsqueeze(0)).squeeze(0)
+            x_logits = torch.softmax(x_logits_og, dim=1)
+            #x_logits = x_logits.view(-1, len(valid_move_tokens))
 
             with torch.no_grad():
                 action = torch.multinomial(x_logits, 1)[0]
                 log_prob = torch.log(x_logits[0][action])
-                #del x
+                del x_logits
                     
             move = valid_move_tokens[action.item()]
             try:
                 move = chess.Move.from_uci(move)
+                if move in board.legal_moves:
+                    all_logits.append(x_logits_og.clone().detach().cpu().numpy())
             except:
                 move = None
 
@@ -370,6 +384,9 @@ def run_game(opponent_elo, past, result_queue, central_model, result, ind):
         log_probs.append(log_prob)
             
         board.push(move)
+        #x_logits = x_logits.detach().cpu().numpy()#torch.tensor(x_logits, requires_grad=False)
+        #with predictions_fen_lock:
+        #predictions_fen2.append(x_logits)
         best_move_fen.append(best)
 
         if past > 0:
@@ -396,9 +413,12 @@ def run_game(opponent_elo, past, result_queue, central_model, result, ind):
     game_time = end_time - start_time
     with model_lock:
         central_model.load_state_dict(local_model.state_dict())
-    x_logit = x_logits.detach().clone().cpu().numpy()
-    del x_logits
-    result[ind] = ((board, roundsGame, game_time, x_logit, best_move_fen))
+    #uci = uci_to_tensor(best).cuda().long()
+    #loss = nn.CrossEntropyLoss()(x_logits, uci).detach().clone().cpu().requires_grad_(True)
+    #x_logit = x_logits_og.detach().clone().cpu().numpy()
+    #del x_logits
+    result[ind] = ((board, roundsGame, game_time, all_logits, best_move_fen))
+    #return board, roundsGame, game_time, predictions_fen, best_move_fen
 
 def getBestMove(board_n, elo):
     stockfish.reset_engine_parameters()
@@ -414,7 +434,7 @@ if __name__ == '__main__':
     optimizer = optim.Adam(model.parameters(), lr=3e-4, weight_decay=0.01, betas=(0.9, 0.95))
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
     try:
-        checkpoint = torch.load('/save-path')
+        checkpoint = torch.load('save-path')
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     except:
@@ -440,7 +460,7 @@ if __name__ == '__main__':
 
     past = 3
     epochs = 200
-    num_games = 5
+    num_games = 10
 
     wins = 0
     losses = 0
@@ -496,37 +516,41 @@ if __name__ == '__main__':
                     if opponent_elo - player_elo < 200:
                         opponent_elo = random.randint(int(opponent_elo)+250, int(player_elo)+1000)
 
-                    best_move_fen_t = torch.tensor([uci_to_tensor(uci) for uci in best_move_fen])
-                    suml = 0
-                    for i in range(len(predictions_fen)):
-                        predictions_fen_t = torch.tensor(predictions_fen[i], requires_grad=True)
-                        ind = best_move_fen_t[i].long()
-                        loss = nn.CrossEntropyLoss()(predictions_fen_t, ind)#.clone().detach().requires_grad_(True)
-                        suml += loss
+                loss = 0
+                best_move_fen_t = torch.tensor([uci_to_tensor(uci) for uci in best_move_fen])
+                for i in range(len(best_move_fen_t)):
+                    predictions_fen_t = torch.tensor(predictions_fen[i], requires_grad=True).squeeze(0)
+                    ind = best_move_fen_t[i].long()
+                    loss_t = nn.CrossEntropyLoss()(predictions_fen_t, ind)
+                    
+                    if result == "1-0":
+                        if roundsGame > 10:
+                            loss_t = 0.3 * loss_t
+                        else:
+                            loss_t = 0.5 * loss_t
+                    elif result == "0-1":
+                        if roundsGame > 10:
+                            loss_t = 1.2 * loss_t
+                        else:
+                            loss_t = 1.5 * loss_t
+                    else:
+                         if roundsGame < 10:
+                            loss_t = 0.8 * loss_t
+
+                    loss += loss_t.item()
                         
-                        if result == "1-0":
-                            if roundsGame > 10:
-                                loss = 0.3 * loss
-                            else:
-                                loss = 0.5 * loss
-                        elif result == "0-1":
-                            if roundsGame > 10:
-                                loss = 1.2 * loss
-                            else:
-                                loss = 1.5 * loss
-                        
-                        optimizer.zero_grad()
-                        loss.backward()
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-                        optimizer.step()
-                        lr_scheduler.step()
-                    loss = suml
-                    if roundsGame > 0:
-                        average_losst = loss / (roundsGame)
-                        print(f"Epoch {epoch + 1}/{epochs}, Game {gi+1}/{num_games}, Game Duration: {game_time:.1f} seconds, Seconds/Round {(game_time/roundsGame):.1f}, Loss/Round: {average_losst:.1f}, Loss: {loss:.1f}, Rounds: {int(    roundsGame)}, Player Elo: {player_elo:.0f}, Opponent Elo: {opponent_elo:.0f}, Wins: {wins}\tLosses: {losses}\tGames played: {games_played}\tWinrate: {wins/games_played:.2f}\tLossrate: {losses/games_played:.2f}")
-                        epoch_losses.append(average_losst)
-                    totalRounds.append(roundsGame)
-                    gi += 1
+                    optimizer.zero_grad()
+                    loss_t.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                    optimizer.step()
+                    lr_scheduler.step()
+                    
+                if roundsGame > 0:
+                    average_losst = loss / (roundsGame)
+                    print(f"Epoch {epoch + 1}/{epochs}\tGame {gi+1}/{num_games}\tLoss: {loss:.5f}\tLoss/Round: {average_losst:.2f}\tDuration: {game_time:.0f}s\tSeconds/Round {(game_time/roundsGame):.0f}\tRounds: {int(roundsGame)}\tPlayer Elo: {player_elo:.0f}\tOpponent Elo: {opponent_elo:.0f}\tWins: {wins}\tLosses: {losses}\tGames played: {games_played}\tWinrate: {wins/games_played:.2f}\tLossrate: {losses/games_played:.2f}")
+                    epoch_losses.append(loss)
+                totalRounds.append(roundsGame)
+                gi += 1
   
         if len(epoch_losses) > 0:
             average_loss = sum(epoch_losses) / len(epoch_losses)
@@ -537,9 +561,9 @@ if __name__ == '__main__':
             torch.save({
                 'model_state_dict': model.state_dict(),  # Save the model's weights
                 'optimizer_state_dict': optimizer.state_dict(),  # Save the optimizer's state
-            }, '/save-path')
+            }, 'save-path')
 
     torch.save({
         'model_state_dict': model.state_dict(),  # Save the model's weights
         'optimizer_state_dict': optimizer.state_dict(),  # Save the optimizer's state
-    }, '/save-path')
+    }, 'save-path')
