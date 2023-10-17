@@ -245,10 +245,6 @@ class ChessGPT(nn.Module):
     def generate(self, fen_input, max_new_tokens, temperature=1.0, top_k=None):
         pass
 
-
-#np.random.seed(7331) 
-#embedding_matrix = np.random.rand(len(custom_vocab) + 2, embedding_dim * (past + 1))
-
 def uci_to_tensor(uci_string):
     return torch.tensor([uci_to_int[uci_string]]).float()
 
@@ -354,7 +350,6 @@ def run_game(opponent_elo, past, result_queue, central_model, result, ind):
 
             x_logits = local_model(x_fen.unsqueeze(0)).squeeze(0)
             x_logits = torch.softmax(x_logits, dim=1)
-            #x_logits = x_logits.view(-1, len(valid_move_tokens))
 
             with torch.no_grad():
                 action = torch.multinomial(x_logits, 1)[0]
@@ -375,9 +370,6 @@ def run_game(opponent_elo, past, result_queue, central_model, result, ind):
         log_probs.append(log_prob)
             
         board.push(move)
-        #x_logits = x_logits.detach().cpu().numpy()#torch.tensor(x_logits, requires_grad=False)
-        #with predictions_fen_lock:
-        #predictions_fen2.append(x_logits)
         best_move_fen.append(best)
 
         if past > 0:
@@ -404,12 +396,9 @@ def run_game(opponent_elo, past, result_queue, central_model, result, ind):
     game_time = end_time - start_time
     with model_lock:
         central_model.load_state_dict(local_model.state_dict())
-    #uci = uci_to_tensor(best).cuda().long()
-    #loss = nn.CrossEntropyLoss()(x_logits, uci).detach().clone().cpu().requires_grad_(True)
     x_logit = x_logits.detach().clone().cpu().numpy()
     del x_logits
     result[ind] = ((board, roundsGame, game_time, x_logit, best_move_fen))
-    #return board, roundsGame, game_time, predictions_fen, best_move_fen
 
 def getBestMove(board_n, elo):
     stockfish.reset_engine_parameters()
@@ -507,30 +496,31 @@ if __name__ == '__main__':
                     if opponent_elo - player_elo < 200:
                         opponent_elo = random.randint(int(opponent_elo)+250, int(player_elo)+1000)
 
-                    #predictions_fen_t = torch.tensor([uci_to_tensor(uci) for uci in predictions_fen])
                     best_move_fen_t = torch.tensor([uci_to_tensor(uci) for uci in best_move_fen])
+                    suml = 0
                     for i in range(len(predictions_fen)):
                         predictions_fen_t = torch.tensor(predictions_fen[i], requires_grad=True)
                         ind = best_move_fen_t[i].long()
                         loss = nn.CrossEntropyLoss()(predictions_fen_t, ind)#.clone().detach().requires_grad_(True)
-                    
-                    if result == "1-0":
-                        if roundsGame > 10:
-                            loss = 0.3 * loss
-                        else:
-                            loss = 0.5 * loss
-                    elif result == "0-1":
-                        if roundsGame > 10:
-                            loss = 1.2 * loss
-                        else:
-                            loss = 1.5 * loss
-                    
-                    optimizer.zero_grad()
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-                    optimizer.step()
-                    lr_scheduler.step()
-
+                        suml += loss
+                        
+                        if result == "1-0":
+                            if roundsGame > 10:
+                                loss = 0.3 * loss
+                            else:
+                                loss = 0.5 * loss
+                        elif result == "0-1":
+                            if roundsGame > 10:
+                                loss = 1.2 * loss
+                            else:
+                                loss = 1.5 * loss
+                        
+                        optimizer.zero_grad()
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                        optimizer.step()
+                        lr_scheduler.step()
+                    loss = suml
                     if roundsGame > 0:
                         average_losst = loss / (roundsGame)
                         print(f"Epoch {epoch + 1}/{epochs}, Game {gi+1}/{num_games}, Game Duration: {game_time:.1f} seconds, Seconds/Round {(game_time/roundsGame):.1f}, Loss/Round: {average_losst:.1f}, Loss: {loss:.1f}, Rounds: {int(    roundsGame)}, Player Elo: {player_elo:.0f}, Opponent Elo: {opponent_elo:.0f}, Wins: {wins}\tLosses: {losses}\tGames played: {games_played}\tWinrate: {wins/games_played:.2f}\tLossrate: {losses/games_played:.2f}")
