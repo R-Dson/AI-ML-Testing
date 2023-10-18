@@ -1,7 +1,6 @@
 
-# Inspiration from https://github.com/karpathy/nanoGPT
+# Inspimport chess
 
-import chess
 import math
 import torch
 import torch.nn as nn
@@ -128,23 +127,23 @@ valid_move_tokens = [f"{c1}{r}{c2}{r2}" for c1 in string.ascii_lowercase[:8]
 uci_to_int = {uci_move: i for i, uci_move in enumerate(valid_move_tokens)}
 
 custom_vocab = {
-    'P': 0, 'N': 1, 'B': 2, 'R': 3, 'Q': 4, 'K': 5,  # Uppercase letters for white pieces
-    'p': 6, 'n': 7, 'b': 8, 'r': 9, 'q': 10, 'k': 11,  # Lowercase letters for black pieces
-    'w': 12, 'b': 13,  # Side to move ('w' for White, 'b' for Black)
-    '-': 14,  # No castling ability
-    'a1': 15, 'b1': 16, 'c1': 17, 'd1': 18, 'e1': 19, 'f1': 20, 'g1': 21, 'h1': 22,  # Square a1 to h1
-    'a2': 23, 'b2': 24, 'c2': 25, 'd2': 26, 'e2': 27, 'f2': 28, 'g2': 29, 'h2': 30,  # Square a2 to h2
-    'a3': 31, 'b3': 32, 'c3': 33, 'd3': 34, 'e3': 35, 'f3': 36, 'g3': 37, 'h3': 38,  # Square a3 to h3
-    'a4': 39, 'b4': 40, 'c4': 41, 'd4': 42, 'e4': 43, 'f4': 44, 'g4': 45, 'h4': 46,  # Square a4 to h4
-    'a5': 47, 'b5': 48, 'c5': 49, 'd5': 50, 'e5': 51, 'f5': 52, 'g5': 53, 'h5': 54,  # Square a5 to h5
-    'a6': 55, 'b6': 56, 'c6': 57, 'd6': 58, 'e6': 59, 'f6': 60, 'g6': 61, 'h6': 62,  # Square a6 to h6
-    'a7': 63, 'b7': 64, 'c7': 65, 'd7': 66, 'e7': 67, 'f7': 68, 'g7': 69, 'h7': 70,  # Square a7 to h7
-    'a8': 71, 'b8': 72, 'c8': 73, 'd8': 74, 'e8': 75, 'f8': 76, 'g8': 77, 'h8': 78,  # Square a8 to h8
-    '0': 79, '1': 80, '2': 81, '3': 82, '4': 83, '5': 84, '6': 85, '7': 86, '8': 87, '9': 88,  # Digits for halfmove clock and fullmove counter
-    '%': 89, '/': 90, ' ': 91, '#': 92  # Padding
+    'P': 1, 'N': 2, 'B': 3, 'R': 4, 'Q': 5, 'K': 6,  # Uppercase letters for white pieces
+    'p': 7, 'n': 8, 'b': 9, 'r': 10, 'q': 11, 'k': 12,  # Lowercase letters for black pieces
+    'w': 13, 'b': 14,  # Side to move ('w' for White, 'b' for Black)
+    '-': 15,  # No castling ability
+    'a1': 16, 'b1': 17, 'c1': 18, 'd1': 19, 'e1': 20, 'f1': 21, 'g1': 22, 'h1': 23,  # Square a1 to h1
+    'a2': 24, 'b2': 25, 'c2': 26, 'd2': 27, 'e2': 28, 'f2': 29, 'g2': 30, 'h2': 31,  # Square a2 to h2
+    'a3': 32, 'b3': 33, 'c3': 34, 'd3': 35, 'e3': 36, 'f3': 37, 'g3': 38, 'h3': 39,  # Square a3 to h3
+    'a4': 40, 'b4': 41, 'c4': 42, 'd4': 43, 'e4': 44, 'f4': 45, 'g4': 46, 'h4': 47,  # Square a4 to h4
+    'a5': 48, 'b5': 49, 'c5': 50, 'd5': 51, 'e5': 52, 'f5': 53, 'g5': 54, 'h5': 55,  # Square a5 to h5
+    'a6': 56, 'b6': 57, 'c6': 58, 'd6': 59, 'e6': 60, 'f6': 61, 'g6': 62, 'h6': 63,  # Square a6 to h6
+    'a7': 64, 'b7': 65, 'c7': 66, 'd7': 67, 'e7': 68, 'f7': 69, 'g7': 70, 'h7': 71,  # Square a7 to h7
+    'a8': 72, 'b8': 73, 'c8': 74, 'd8': 75, 'e8': 76, 'f8': 77, 'g8': 78, 'h8': 79,  # Square a8 to h8
+    '0': 80, '1': 81, '2': 82, '3': 83, '4': 84, '5': 85, '6': 86, '7': 87, '8': 88, '9': 89,  # Digits for halfmove clock and fullmove counter
+    '%': 90, '/': 91, ' ': 92, '#': 93  # Padding
 }
 
-embedding_dim = 512
+embedding_dim = 256
 
 stockfish = Stockfish("stockfish-path")
 
@@ -175,27 +174,19 @@ class ChessGPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]).to(self.device),
             ln_f = LayerNorm(config.n_embd, bias=config.bias).to(self.device),
         ))
-        # self.transformer = self.transformer.to(self.device)
-
 
         self.uci_head = nn.Linear(config.n_embd, config.vocab_size, bias=False).to(self.device)
         
         self.transformer.wte.weight = self.uci_head.weight
 
-        # Output layer for UCI notation
-        #self.uci_head = nn.Linear(config.n_embd, config.vocab_size, bias=False).to(self.device)
-        #self.transformer.wte.weight = self.uci_head.weight
-
-         # init all weights
+        # init all weights
         self.apply(self._init_weights)
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
-
         # report number of parameters
-        #print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
-
+        #print("number of parameters: %.2fM" % (self.get_num_params()/1e6,)
     
     def forward(self, fen):
         fen = fen.to(self.device).long()
@@ -209,18 +200,6 @@ class ChessGPT(nn.Module):
         logits = self.uci_head(outputs.mean(dim=1, keepdim=True))
 
         return logits
-    """
-    def forward(self, fen):
-        fen = fen.to(self.device).long()
-        inputs = self.transformer.wte(fen)
-        
-        outputs = inputs  # Initialize outputs
-        for i, block in enumerate(self.transformer.h):
-            outputs = block(outputs)
-        
-        logits = self.uci_head(outputs)
-
-        return logits"""
     
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -245,20 +224,10 @@ class ChessGPT(nn.Module):
     def generate(self, fen_input, max_new_tokens, temperature=1.0, top_k=None):
         pass
 
-
-#np.random.seed(7331) 
-#embedding_matrix = np.random.rand(len(custom_vocab) + 2, embedding_dim * (past + 1))
-
 def uci_to_tensor(uci_string):
     return torch.tensor([uci_to_int[uci_string]]).float()
 
 def fen_to_tensor(fen_string, max_length):
-    if max_length != 0 and len(fen_string) > max_length:
-        fen_string = fen_string[:max_length]
-    elif max_length != 0 and len(fen_string) < max_length:
-        padding = "#" * (max_length - len(fen_string))
-        fen_string += padding
-
     i = 0
     tensor = []
 
@@ -270,14 +239,14 @@ def fen_to_tensor(fen_string, max_length):
         elif char.isalpha() and i + 1 < len(fen_string) and fen_string[i:i+2] in custom_vocab:
             tensor.append(custom_vocab[fen_string[i:i+2]])
             i += 2
-    """
-    mean = np.mean(tensor)
-    std = np.std(tensor)
-    standardized_tensor = np.array([(np.array(tensor) - mean) / std])"""
-    #min_val = min(tensor)
-    #max_val = max(tensor)
-    #normalized_tensor = np.array([[(val - min_val) / (max_val - min_val) for val in tensor]])
-    return torch.tensor(tensor)
+    if max_length != 0:
+        if len(tensor) < max_length:
+            padding = [0] * (max_length - len(tensor))
+            tensor += padding
+        else:
+            tensor = tensor[:max_length]
+
+    return torch.tensor(tensor, requires_grad=True, dtype=torch.float)
 
 def update_elo_ratings(player_elo, opponent_elo, game_result, change_opp_elo=False, K=32):
     # Calculate expected scores
@@ -303,14 +272,21 @@ def update_elo_ratings(player_elo, opponent_elo, game_result, change_opp_elo=Fal
     else:
         return new_player_elo, opponent_elo
 
+cross_entropy = nn.CrossEntropyLoss()
+
+def calc_per_move_loss(best_moves, predictions):
+  losses = []
+  for i in range(len(best_moves)):
+    loss = cross_entropy(predictions[i], best_moves[i])
+    losses.append(loss)
+  return losses
+
 ctx = multiprocessing.get_context("spawn")
 model_lock = ctx.Lock()
 
-max_length = 64
+max_length = 192
 
-def run_game(opponent_elo, past, result_queue, central_model, result, ind):
-    local_model = ChessGPT(GPTConfig)
-    local_model.load_state_dict(central_model.state_dict())
+def run_game(opponent_elo, past, optimizer, central_model, wins, losses, games_played):
     start_time = time.time()
     board = chess.Board()
     
@@ -337,31 +313,29 @@ def run_game(opponent_elo, past, result_queue, central_model, result, ind):
                 board_fen += "%" + len(board.fen())*"#"
                     
         x_fen = fen_to_tensor(board_fen, max_length)
-        x_logits_og = local_model(x_fen.unsqueeze(0)).squeeze(0)
+        x_logits_og = central_model(x_fen.unsqueeze(0)).squeeze(0)
         x_logits = torch.softmax(x_logits_og, dim=1)
 
         with torch.no_grad():
             action = torch.multinomial(x_logits, 1)[0]
             log_prob = torch.log(x_logits[0][action])
-            #del x
 
         move = valid_move_tokens[action.item()]
         try:
             move = chess.Move.from_uci(move)
             if move in board.legal_moves:
-                all_logits.append(x_logits_og.detach().cpu().numpy())
+                all_logits.append(x_logits_og.squeeze(0))
         except:
             move = None
             
         while move is None or move not in board.legal_moves:
             attempts += 1
-            if attempts > 2500:
+            if attempts > 10000:
                 move = None
                 break
 
-            x_logits_og = local_model(x_fen.unsqueeze(0)).squeeze(0)
+            x_logits_og = central_model(x_fen.unsqueeze(0)).squeeze(0)
             x_logits = torch.softmax(x_logits_og, dim=1)
-            #x_logits = x_logits.view(-1, len(valid_move_tokens))
 
             with torch.no_grad():
                 action = torch.multinomial(x_logits, 1)[0]
@@ -372,7 +346,7 @@ def run_game(opponent_elo, past, result_queue, central_model, result, ind):
             try:
                 move = chess.Move.from_uci(move)
                 if move in board.legal_moves:
-                    all_logits.append(x_logits_og.clone().detach().cpu().numpy())
+                    all_logits.append(x_logits_og.squeeze(0))
             except:
                 move = None
 
@@ -384,9 +358,6 @@ def run_game(opponent_elo, past, result_queue, central_model, result, ind):
         log_probs.append(log_prob)
             
         board.push(move)
-        #x_logits = x_logits.detach().cpu().numpy()#torch.tensor(x_logits, requires_grad=False)
-        #with predictions_fen_lock:
-        #predictions_fen2.append(x_logits)
         best_move_fen.append(best)
 
         if past > 0:
@@ -405,20 +376,48 @@ def run_game(opponent_elo, past, result_queue, central_model, result, ind):
             if len(earlier_moves) > past:
                 earlier_moves.pop(0)
             earlier_moves.append(board.fen())
+    
+    best_t = torch.tensor([uci_to_tensor(best).long().cuda() for best in best_move_fen]).cuda()
+    if len(all_logits) == 0:
+        return
+    all_logits_t = torch.stack(all_logits, dim=0) 
+    loss = nn.CrossEntropyLoss()(all_logits_t, best_t)
 
-    torch.cuda.empty_cache()
-    #movensgames.append(roundsGame)
-        
+    loss_s = 1
+    bresult = board.result()
+    if bresult == "1-0":
+        print("AI wins")
+        if roundsGame > 10:
+            loss_s = 0.8 * loss_s
+        else:
+            loss_s = 0.55 * loss_s
+    elif bresult == "0-1":
+        print("AI lost")
+        if roundsGame > 10:
+            loss_s = 1.2 * loss_s
+        else:
+            loss_s = 1.5 * loss_s
+    else:
+        if roundsGame < 10:
+            loss_s = 0.8 * loss_s
+    loss *= loss_s
+
+    with model_lock:
+        games_played += 1
+        if bresult == "1-0":
+            wins += 1
+        elif bresult == "0-1":
+            losses += 1
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(central_model.parameters(), 0.5)
+        optimizer.step()
+
     end_time = time.time()
     game_time = end_time - start_time
-    with model_lock:
-        central_model.load_state_dict(local_model.state_dict())
-    #uci = uci_to_tensor(best).cuda().long()
-    #loss = nn.CrossEntropyLoss()(x_logits, uci).detach().clone().cpu().requires_grad_(True)
-    #x_logit = x_logits_og.detach().clone().cpu().numpy()
-    #del x_logits
-    result[ind] = ((board, roundsGame, game_time, all_logits, best_move_fen))
-    #return board, roundsGame, game_time, predictions_fen, best_move_fen
+
+    average_losst = loss.item() / (roundsGame)
+    print(f"Loss: {loss.item():.5f}\tLoss/Round: {average_losst:.2f}\tDuration: {game_time:.0f}s\tSeconds/Round {(game_time/roundsGame):.0f}\tRounds: {int(roundsGame)}")
 
 def getBestMove(board_n, elo):
     stockfish.reset_engine_parameters()
@@ -429,6 +428,7 @@ def getBestMove(board_n, elo):
 if __name__ == '__main__':
     
     model = ChessGPT(GPTConfig)
+    model.train()
     model.share_memory()
 
     optimizer = optim.Adam(model.parameters(), lr=3e-4, weight_decay=0.01, betas=(0.9, 0.95))
@@ -440,8 +440,6 @@ if __name__ == '__main__':
     except:
         print("No checkpoint found")
 
-    result_queue = ctx.Queue()
-
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     if device == 'cuda':
         print("Using GPU")
@@ -450,25 +448,17 @@ if __name__ == '__main__':
     opponent_elo = 1500
 
     stockfish.set_elo_rating(opponent_elo)
-    penalty = 1.0
-    batch_size = 64
-    clip_epsilon = 0.2
-    value_coefficient = 0.5
-    entropy_coefficient = 0.01
-
-    totalRounds = []
 
     past = 3
     epochs = 200
-    num_games = 10
+    num_games = 5
 
     wins = 0
     losses = 0
     games_played = 0
-
     scaler = GradScaler()
-    epoch_losses = []
-
+    model.train()
+    wins, losses, games_played = 0, 0, 0
     for epoch in range(epochs):
         total_loss = 0.0
         rounds = 0
@@ -476,87 +466,22 @@ if __name__ == '__main__':
         total_loss = 0.0
         movensgames = []
         game_results = []
-
-        with ctx.Manager() as manager:
-            shared_results = manager.list([None] * num_games)
-            
-            processes = []
-            # Run games in parallel
-            for game in range(num_games):
-                game_process = ctx.Process(target=run_game, args=(opponent_elo, past, result_queue, model, shared_results, game))
-                game_process.start()
-                processes.append(game_process)
-
-            for game_process in processes:
-                game_process.join()
-
-            gi = 0
-            for game in shared_results:
-                if game is None:
-                    print("Game is None")
-                    continue
-                board, roundsGame, game_time, predictions_fen, best_move_fen = game#[game] # result_queue.get()
-                movensgames.append(roundsGame)
-                games_played += 1
-                result = board.result()
-                if result == "1-0":
-                    player_elo, opponent_elo = update_elo_ratings(player_elo, opponent_elo, 1, change_opp_elo=True)
-                    wins += 1
-                    print("AI wins")
-                elif result == "0-1":
-                    player_elo, opponent_elo = update_elo_ratings(player_elo, opponent_elo, 0, change_opp_elo=True)
-                    print("AI lost")
-                    losses += 1
-                elif result == "1/2-1/2":
-                    player_elo, opponent_elo = update_elo_ratings(player_elo, opponent_elo, 0.5, change_opp_elo=True)
-                    print("Draw")
-                else:
-                    player_elo, opponent_elo = update_elo_ratings(player_elo, opponent_elo, 0, change_opp_elo=True)
-
-                    if opponent_elo - player_elo < 200:
-                        opponent_elo = random.randint(int(opponent_elo)+250, int(player_elo)+1000)
-
-                loss = 0
-                best_move_fen_t = torch.tensor([uci_to_tensor(uci) for uci in best_move_fen])
-                for i in range(len(best_move_fen_t)):
-                    predictions_fen_t = torch.tensor(predictions_fen[i], requires_grad=True).squeeze(0)
-                    ind = best_move_fen_t[i].long()
-                    loss_t = nn.CrossEntropyLoss()(predictions_fen_t, ind)
-                    
-                    if result == "1-0":
-                        if roundsGame > 10:
-                            loss_t = 0.3 * loss_t
-                        else:
-                            loss_t = 0.5 * loss_t
-                    elif result == "0-1":
-                        if roundsGame > 10:
-                            loss_t = 1.2 * loss_t
-                        else:
-                            loss_t = 1.5 * loss_t
-                    else:
-                         if roundsGame < 10:
-                            loss_t = 0.8 * loss_t
-
-                    loss += loss_t.item()
-                        
-                    optimizer.zero_grad()
-                    loss_t.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-                    optimizer.step()
-                    lr_scheduler.step()
-                    
-                if roundsGame > 0:
-                    average_losst = loss / (roundsGame)
-                    print(f"Epoch {epoch + 1}/{epochs}\tGame {gi+1}/{num_games}\tLoss: {loss:.5f}\tLoss/Round: {average_losst:.2f}\tDuration: {game_time:.0f}s\tSeconds/Round {(game_time/roundsGame):.0f}\tRounds: {int(roundsGame)}\tPlayer Elo: {player_elo:.0f}\tOpponent Elo: {opponent_elo:.0f}\tWins: {wins}\tLosses: {losses}\tGames played: {games_played}\tWinrate: {wins/games_played:.2f}\tLossrate: {losses/games_played:.2f}")
-                    epoch_losses.append(loss)
-                totalRounds.append(roundsGame)
-                gi += 1
-  
-        if len(epoch_losses) > 0:
-            average_loss = sum(epoch_losses) / len(epoch_losses)
-            print(f"Epoch {epoch + 1}/{epochs}, Average Loss: {average_loss:.1f}")
+        processes = []
         
-        if epoch % 1 == 0:
+        for game in range(num_games):
+            game_process = ctx.Process(target=run_game, args=(opponent_elo, past, optimizer, model, wins, losses, games_played))
+            game_process.start()
+            processes.append(game_process)
+
+        for game_process in processes:
+            game_process.join()
+
+        lr_scheduler.step()
+        torch.cuda.empty_cache()
+
+        print(f"Wins: {wins}\tLosses: {losses}\tGames played: {games_played}")
+        
+        if epoch % 4 == 0:
             print("Saving checkpoint")
             torch.save({
                 'model_state_dict': model.state_dict(),  # Save the model's weights
