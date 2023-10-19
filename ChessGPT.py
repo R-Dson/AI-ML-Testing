@@ -1,5 +1,7 @@
 
-# Inspimport chess
+# Inspiration from https://github.com/karpathy/nanoGPT
+
+import chess
 
 import math
 import torch
@@ -185,8 +187,10 @@ class ChessGPT(nn.Module):
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
         # report number of parameters
-        #print("number of parameters: %.2fM" % (self.get_num_params()/1e6,)
+        #print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
     
     def forward(self, fen):
         fen = fen.to(self.device).long()
@@ -225,7 +229,7 @@ class ChessGPT(nn.Module):
         pass
 
 def uci_to_tensor(uci_string):
-    return torch.tensor([uci_to_int[uci_string]]).float()
+    return torch.tensor([uci_to_int[uci_string]]).float().cuda()
 
 def fen_to_tensor(fen_string, max_length):
     i = 0
@@ -246,7 +250,8 @@ def fen_to_tensor(fen_string, max_length):
         else:
             tensor = tensor[:max_length]
 
-    return torch.tensor(tensor, requires_grad=True, dtype=torch.float)
+    return torch.tensor(tensor, requires_grad=True, dtype=torch.float).cuda()
+    
 
 def update_elo_ratings(player_elo, opponent_elo, game_result, change_opp_elo=False, K=32):
     # Calculate expected scores
@@ -286,7 +291,7 @@ model_lock = ctx.Lock()
 
 max_length = 192
 
-def run_game(opponent_elo, past, optimizer, central_model, wins, losses, games_played):
+def run_game(opponent_elo, past, optimizer, model, results, loss_list):
     start_time = time.time()
     board = chess.Board()
     
@@ -313,7 +318,7 @@ def run_game(opponent_elo, past, optimizer, central_model, wins, losses, games_p
                 board_fen += "%" + len(board.fen())*"#"
                     
         x_fen = fen_to_tensor(board_fen, max_length)
-        x_logits_og = central_model(x_fen.unsqueeze(0)).squeeze(0)
+        x_logits_og = model(x_fen.unsqueeze(0)).squeeze(0)
         x_logits = torch.softmax(x_logits_og, dim=1)
 
         with torch.no_grad():
@@ -334,7 +339,7 @@ def run_game(opponent_elo, past, optimizer, central_model, wins, losses, games_p
                 move = None
                 break
 
-            x_logits_og = central_model(x_fen.unsqueeze(0)).squeeze(0)
+            x_logits_og = model(x_fen.unsqueeze(0)).squeeze(0)
             x_logits = torch.softmax(x_logits_og, dim=1)
 
             with torch.no_grad():
@@ -385,14 +390,15 @@ def run_game(opponent_elo, past, optimizer, central_model, wins, losses, games_p
 
     loss_s = 1
     bresult = board.result()
+
     if bresult == "1-0":
-        print("AI wins")
+        #print("AI wins")
         if roundsGame > 10:
             loss_s = 0.8 * loss_s
         else:
             loss_s = 0.55 * loss_s
     elif bresult == "0-1":
-        print("AI lost")
+        #print("AI lost")
         if roundsGame > 10:
             loss_s = 1.2 * loss_s
         else:
@@ -401,16 +407,17 @@ def run_game(opponent_elo, past, optimizer, central_model, wins, losses, games_p
         if roundsGame < 10:
             loss_s = 0.8 * loss_s
     loss *= loss_s
-
+    loss_list.append(loss.item())
     with model_lock:
-        games_played += 1
+        stats = results['stats']
+        stats['games_played'] += 1
         if bresult == "1-0":
-            wins += 1
+            stats['wins'] += 1
         elif bresult == "0-1":
-            losses += 1
+            stats['losses'] += 1
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(central_model.parameters(), 0.5)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         optimizer.step()
 
     end_time = time.time()
@@ -419,13 +426,113 @@ def run_game(opponent_elo, past, optimizer, central_model, wins, losses, games_p
     average_losst = loss.item() / (roundsGame)
     print(f"Loss: {loss.item():.5f}\tLoss/Round: {average_losst:.2f}\tDuration: {game_time:.0f}s\tSeconds/Round {(game_time/roundsGame):.0f}\tRounds: {int(roundsGame)}")
 
+def generate_random_chess_position():
+    board = chess.Board()
+    
+    last_fen_1 = None
+    last_fen_2 = None
+    gamel = random.randint(4, 30)
+    st = ''
+    for _ in range(gamel):
+        legal_moves = list(board.legal_moves)
+        try:
+            random_move = random.choice(legal_moves)
+            last_fen_2 = last_fen_1
+            last_fen_1 = board.fen()
+        except:
+            return None
+        board.push(random_move)
+        try:
+            st = "%".join([board.fen(), last_fen_1, last_fen_2])
+        except:
+            st = "%".join([board.fen(), last_fen_1, "#"*len(last_fen_1)])
+    return board.fen(), st
+
 def getBestMove(board_n, elo):
-    stockfish.reset_engine_parameters()
-    stockfish.set_elo_rating(elo)
-    stockfish.set_fen_position(board_n.fen())
-    return stockfish.get_best_move_time(25)
+    return getBestMoveFen(board_n.fen(), elo)
+
+def generate_validation_set(num_positions):
+    validation_set = []
+    for _ in range(num_positions):
+        gen = generate_random_chess_position()
+        if gen != None:
+            validation_set.append(gen)
+    return validation_set
+
+def getBestMoveFen(board_fen, elo):
+    try:
+        stockfish.reset_engine_parameters()
+        stockfish.set_elo_rating(elo)
+        stockfish.set_fen_position(board_fen)
+        return stockfish.get_best_move_time(25)
+    except:
+        return None
+
+def validate(model, validation_set):
+    model.eval()
+    total_loss = 0.0
+
+    for board_fen, past_moves in validation_set:
+        best_move = getBestMoveFen(board_fen, 3500)
+        x_fen = fen_to_tensor(past_moves, max_length)
+        x_logits = model(x_fen.unsqueeze(0)).squeeze(0)
+        
+        try:
+            target_actions = uci_to_tensor(best_move).long().cuda() #[uci_to_tensor(move).long() for move in best_moves]
+        except:
+            continue
+        loss = nn.CrossEntropyLoss()(x_logits, target_actions)#torch.stack(target_actions, dim=0))
+        total_loss += loss.item()
+
+    avg_loss = total_loss / len(validation_set)
+    print(f"Validation Loss: {avg_loss:.5f}")
+
+def process_board(board_fens, model, optimizer):
+    if board_fens is None:
+        return
+
+    board_fen = board_fens[0]
+    boards_fen = board_fens[1]
+    best_move = getBestMoveFen(board_fen, 3500)
+
+    if best_move is None:
+        return
+
+    try:
+        target_action = uci_to_tensor(best_move).long()
+    except:
+        return
+
+    x_fen = fen_to_tensor(boards_fen, max_length)
+    x_logits = model(x_fen.unsqueeze(0)).squeeze(0)
+
+    loss = nn.CrossEntropyLoss()(x_logits, target_action)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    
+def moves_train(model, optimizer, num_boards, num_validation_positions, validation_set):
+    model.train()
+    pool = ctx.Pool(processes=8)  # Adjust the number of processes as needed
+
+    for board in range(num_boards):
+        board_fens = generate_random_chess_position()
+        pool.apply_async(process_board, args=(board_fens, model, optimizer))
+
+        #if board % 50 == 0:
+            #avgl = total_loss / (board + 1)
+            #print(f"Board {board+1}/{num_boards}")#\tavg loss: {avgl:.5f}")
+
+        if (board + 1) % num_validation_positions == 0:
+            validate(model, validation_set)
+
+    pool.close()
+    pool.join()
 
 if __name__ == '__main__':
+
+    epochs = 100
+    batch_size = 64
     
     model = ChessGPT(GPTConfig)
     model.train()
@@ -445,20 +552,22 @@ if __name__ == '__main__':
         print("Using GPU")
 
     player_elo = 500
-    opponent_elo = 1500
+    opponent_elo = 2000
+    num_games = 100  
+    num_validation_positions = 1000 
+    num_boards=12000
 
     stockfish.set_elo_rating(opponent_elo)
 
-    past = 3
-    epochs = 200
+    past = 2
+    epochs = 2000
     num_games = 5
 
     wins = 0
     losses = 0
     games_played = 0
     scaler = GradScaler()
-    model.train()
-    wins, losses, games_played = 0, 0, 0
+    stats_store = {'wins': 0, 'losses': 0, 'games_played': 0}
     for epoch in range(epochs):
         total_loss = 0.0
         rounds = 0
@@ -467,19 +576,34 @@ if __name__ == '__main__':
         movensgames = []
         game_results = []
         processes = []
-        
-        for game in range(num_games):
-            game_process = ctx.Process(target=run_game, args=(opponent_elo, past, optimizer, model, wins, losses, games_played))
-            game_process.start()
-            processes.append(game_process)
+        model.train()
 
-        for game_process in processes:
-            game_process.join()
+        with ctx.Manager() as manager:
+            results = manager.dict()
+            loss = manager.list()
+            results['stats'] = manager.dict(wins=0, losses=0, games_played=0)
+            for game in range(num_games):
+                game_process = ctx.Process(target=run_game, args=(opponent_elo, past, optimizer, model, results, loss))
+                game_process.start()
+                processes.append(game_process)
+            
+            for game_process in processes:
+                game_process.join()
 
-        lr_scheduler.step()
-        torch.cuda.empty_cache()
+            lr_scheduler.step()
+            torch.cuda.empty_cache()
+            stats = results['stats']
+            wins = stats['wins']
+            losses = stats['losses']
+            loss = sum(loss)
+            games_played = stats['games_played']
 
-        print(f"Wins: {wins}\tLosses: {losses}\tGames played: {games_played}")
+            stats_store['wins'] += wins
+            stats_store['losses'] += losses
+            stats_store['games_played'] += games_played
+
+            print(f"Wins: {stats_store['wins']}\tLosses: {stats_store['losses']}\tGames played: {stats_store['games_played']}\tLoss: {loss:.5f}")
+            moves_train(model, optimizer, num_boards, num_validation_positions, generate_validation_set(num_validation_positions))
         
         if epoch % 4 == 0:
             print("Saving checkpoint")
@@ -487,6 +611,7 @@ if __name__ == '__main__':
                 'model_state_dict': model.state_dict(),  # Save the model's weights
                 'optimizer_state_dict': optimizer.state_dict(),  # Save the optimizer's state
             }, 'save-path')
+            print("Checkpoint saved")
 
     torch.save({
         'model_state_dict': model.state_dict(),  # Save the model's weights
