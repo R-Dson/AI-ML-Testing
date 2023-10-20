@@ -145,18 +145,18 @@ custom_vocab = {
     '%': 90, '/': 91, ' ': 92, '#': 93  # Padding
 }
 
-embedding_dim = 256
 
 stockfish = Stockfish("stockfish-path")
 
+embedding_dim = 128
 @dataclass
 class GPTConfig:
     block_size: int = embedding_dim #1024
     vocab_size: int = len(valid_move_tokens)
     n_layer: int = 8
-    n_head: int = 8
-    n_embd: int = embedding_dim #768
-    dropout: float = 0.2
+    n_head: int = 4
+    n_embd: int = int(embedding_dim*8)#8) #768
+    dropout: float = 0.25
     bias: bool = True
 
 class ChessGPT(nn.Module):
@@ -289,7 +289,7 @@ def calc_per_move_loss(best_moves, predictions):
 ctx = multiprocessing.get_context("spawn")
 model_lock = ctx.Lock()
 
-max_length = 192
+max_length = 128
 
 def run_game(opponent_elo, past, optimizer, model, results, loss_list):
     start_time = time.time()
@@ -322,7 +322,12 @@ def run_game(opponent_elo, past, optimizer, model, results, loss_list):
         x_logits = torch.softmax(x_logits_og, dim=1)
 
         with torch.no_grad():
-            action = torch.multinomial(x_logits, 1)[0]
+            try:
+                action = torch.multinomial(x_logits, 1)[0]
+            except:
+                print(board_fen)
+                print(x_logits)
+                return
             log_prob = torch.log(x_logits[0][action])
 
         move = valid_move_tokens[action.item()]
@@ -343,7 +348,12 @@ def run_game(opponent_elo, past, optimizer, model, results, loss_list):
             x_logits = torch.softmax(x_logits_og, dim=1)
 
             with torch.no_grad():
-                action = torch.multinomial(x_logits, 1)[0]
+                try:
+                    action = torch.multinomial(x_logits, 1)[0]
+                except:
+                    print(board_fen)
+                    print(x_logits)
+                    return
                 log_prob = torch.log(x_logits[0][action])
                 del x_logits
                     
@@ -429,42 +439,50 @@ def run_game(opponent_elo, past, optimizer, model, results, loss_list):
 def generate_random_chess_position():
     board = chess.Board()
     
-    last_fen_1 = None
-    last_fen_2 = None
+    #last_fen_1 = None
+    #last_fen_2 = None
     gamel = random.randint(4, 30)
-    st = ''
+    #st = ''
     for _ in range(gamel):
         legal_moves = list(board.legal_moves)
         try:
             random_move = random.choice(legal_moves)
-            last_fen_2 = last_fen_1
-            last_fen_1 = board.fen()
+            #last_fen_2 = last_fen_1
+            #last_fen_1 = board.fen()
         except:
             return None
         board.push(random_move)
-        try:
-            st = "%".join([board.fen(), last_fen_1, last_fen_2])
-        except:
-            st = "%".join([board.fen(), last_fen_1, "#"*len(last_fen_1)])
-    return board.fen(), st
+        #try:
+        #    st = "%".join([board.fen(), last_fen_1, last_fen_2])
+        #except:
+        #    st = "%".join([board.fen(), last_fen_1, "#"*len(last_fen_1)])
+    st = board.fen()
+    return board.fen()#, st
 
 def getBestMove(board_n, elo):
     return getBestMoveFen(board_n.fen(), elo)
 
 def generate_validation_set(num_positions):
     validation_set = []
-    for _ in range(num_positions):
+    
+    while len(validation_set) < num_positions:
         gen = generate_random_chess_position()
         if gen != None:
             validation_set.append(gen)
+        
     return validation_set
 
 def getBestMoveFen(board_fen, elo):
+    stockfish.reset_engine_parameters()
+    stockfish.set_elo_rating(elo)
+    stockfish.set_fen_position(board_fen)
+    move = None
+    while move is None:
+        move =  stockfish.get_best_move_time(25)
+    return move
     try:
-        stockfish.reset_engine_parameters()
-        stockfish.set_elo_rating(elo)
-        stockfish.set_fen_position(board_fen)
-        return stockfish.get_best_move_time(25)
+        
+        return
     except:
         return None
 
@@ -472,9 +490,9 @@ def validate(model, validation_set):
     model.eval()
     total_loss = 0.0
 
-    for board_fen, past_moves in validation_set:
+    for board_fen in validation_set:
         best_move = getBestMoveFen(board_fen, 3500)
-        x_fen = fen_to_tensor(past_moves, max_length)
+        x_fen = fen_to_tensor(board_fen, max_length)
         x_logits = model(x_fen.unsqueeze(0)).squeeze(0)
         
         try:
@@ -513,7 +531,8 @@ def process_board(board_fens, model, optimizer):
     
 def moves_train(model, optimizer, num_boards, num_validation_positions, validation_set):
     model.train()
-    pool = ctx.Pool(processes=8)  # Adjust the number of processes as needed
+    pool = ctx.Pool(processes=4)  # Adjust the number of processes as needed
+    torch.cuda.empty_cache()
 
     for board in range(num_boards):
         board_fens = generate_random_chess_position()
@@ -522,7 +541,7 @@ def moves_train(model, optimizer, num_boards, num_validation_positions, validati
         #if board % 50 == 0:
             #avgl = total_loss / (board + 1)
             #print(f"Board {board+1}/{num_boards}")#\tavg loss: {avgl:.5f}")
-
+        torch.cuda.empty_cache()
         if (board + 1) % num_validation_positions == 0:
             validate(model, validation_set)
 
@@ -539,7 +558,7 @@ if __name__ == '__main__':
     model.share_memory()
 
     optimizer = optim.Adam(model.parameters(), lr=3e-4, weight_decay=0.01, betas=(0.9, 0.95))
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.2)
     try:
         checkpoint = torch.load('save-path')
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -555,13 +574,13 @@ if __name__ == '__main__':
     opponent_elo = 2000
     num_games = 100  
     num_validation_positions = 1000 
-    num_boards=12000
+    num_boards=800
 
     stockfish.set_elo_rating(opponent_elo)
 
-    past = 2
+    past = 0
     epochs = 2000
-    num_games = 5
+    num_games = 4
 
     wins = 0
     losses = 0
@@ -577,7 +596,8 @@ if __name__ == '__main__':
         game_results = []
         processes = []
         model.train()
-
+        torch.cuda.empty_cache()
+        
         with ctx.Manager() as manager:
             results = manager.dict()
             loss = manager.list()
@@ -589,8 +609,7 @@ if __name__ == '__main__':
             
             for game_process in processes:
                 game_process.join()
-
-            lr_scheduler.step()
+            
             torch.cuda.empty_cache()
             stats = results['stats']
             wins = stats['wins']
@@ -602,9 +621,10 @@ if __name__ == '__main__':
             stats_store['losses'] += losses
             stats_store['games_played'] += games_played
 
-            print(f"Wins: {stats_store['wins']}\tLosses: {stats_store['losses']}\tGames played: {stats_store['games_played']}\tLoss: {loss:.5f}")
+            print(f"Epoch: {epoch}\tWins: {stats_store['wins']}\tLosses: {stats_store['losses']}\tGames played: {stats_store['games_played']}\tLoss: {loss:.5f}")
             moves_train(model, optimizer, num_boards, num_validation_positions, generate_validation_set(num_validation_positions))
         
+        lr_scheduler.step()
         if epoch % 4 == 0:
             print("Saving checkpoint")
             torch.save({
