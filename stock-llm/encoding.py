@@ -1,6 +1,8 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
 
+### TODO...
+
 class FinancialDataset(Dataset):
     def __init__(self, data):
         self.data = data
