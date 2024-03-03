@@ -139,7 +139,12 @@ def get_stock_rating(ticker):
 
 def get_finviz_data(ticker):
 
-    fundamental_df = Quote(ticker=ticker).fundamental_df
+    quote = Quote(ticker=ticker)
+
+    if not quote or not quote.exists:
+        return None
+
+    fundamental_df = quote.fundamental_df
     return_Data = {}
     try:
         return_Data['RSI'] = float(fundamental_df['RSI (14)'].values[0])
@@ -248,6 +253,9 @@ def main():
         ticker_Data = {}
 
         finviz = get_finviz_data(ticker)
+        if not finviz:
+            continue
+
         rating_out, esg_s = get_stock_rating(ticker)
 
         finviz_rating = finviz['Recom']
