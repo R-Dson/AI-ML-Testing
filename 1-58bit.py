@@ -7,95 +7,178 @@ from datasets import load_dataset
 
 tokenizer = PreTrainedTokenizerFast.from_pretrained('Xenova/Meta-Llama-3.1-Tokenizer')
 
-class PositionalEncoding(nn.Module):
+class QuantizeFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, gamma, epsilon=1e-8):
+        ctx.save_for_backward(input, gamma)
+        ctx.epsilon = epsilon
+        W_s = input / (gamma + epsilon)
+        W_hat = torch.clamp(torch.round(W_s), -1, 1)
+        return W_hat
 
-    def __init__(self, d_model: int, max_len: int = 5000):
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, gamma = ctx.saved_tensors
+        epsilon = ctx.epsilon
+        grad_input = grad_output / (gamma + epsilon)
+        return grad_input, None, None
+
+quantize = QuantizeFunction.apply
+
+class ActivationQuantization(nn.Module):
+    def __init__(self, num_bits=8):
         super().__init__()
+        self.num_bits = num_bits
 
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
-        pe = torch.zeros(64, max_len, d_model).cpu()
-        pe[:,:, 0::2] = torch.sin(position * div_term)
-        pe[:,:, 1::2] = torch.cos(position * div_term)
-        self.pe = pe.transpose(0, 1)
-        
-    def forward(self, x: Tensor) -> Tensor:
-        x = x + self.pe[:x.size(0),:x.size(1),:].cuda()
-        return x
+    def forward(self, x):
+        max_val = torch.max(torch.abs(x))
+        scale = (2 ** (self.num_bits - 1) - 1) / max_val
+        return torch.round(x * scale) / scale
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True))
+        x_norm = x / (rms + self.eps)
+        return self.weight * x_norm
+
+class SwiGLU(nn.Module):
+    def __init__(self, in_features, hidden_features):
+        super().__init__()
+        self.w1 = BitLinear(in_features, hidden_features)
+        self.w2 = BitLinear(in_features, hidden_features)
+        self.w3 = BitLinear(hidden_features, in_features)
+
+    def forward(self, x):
+        x1 = self.w1(x)
+        x2 = self.w2(x)
+        hidden = torch.sigmoid(x1) * x2
+        return self.w3(hidden)
+
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim, max_position_embeddings=2048, base=10000):
+        super().__init__()
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim // 2).float() / (dim // 2)))
+        self.register_buffer("inv_freq", inv_freq)
+        self.max_seq_len_cached = max_position_embeddings
+        t = torch.arange(self.max_seq_len_cached, device=self.inv_freq.device).type_as(self.inv_freq)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer("cos_cached", emb.cos()[None, None, :, :], persistent=False)
+        self.register_buffer("sin_cached", emb.sin()[None, None, :, :], persistent=False)
+
+    def forward(self, x, seq_len=None):
+        if seq_len > self.max_seq_len_cached:
+            self.max_seq_len_cached = seq_len
+            t = torch.arange(self.max_seq_len_cached, device=self.inv_freq.device).type_as(self.inv_freq)
+            freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            self.register_buffer("cos_cached", emb.cos()[None, None, :, :], persistent=False)
+            self.register_buffer("sin_cached", emb.sin()[None, None, :, :], persistent=False)
+
+        # Ensure the cosine and sine have the correct dimension
+        cos = torch.cat([self.cos_cached, self.cos_cached], dim=-1)
+        sin = torch.cat([self.sin_cached, self.sin_cached], dim=-1)
+
+        return cos[:, :, :seq_len, :], sin[:, :, :seq_len, :]
+def rotate_half(x):
+    x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+def apply_rotary_pos_emb(q, k, cos, sin):
+    # q and k shapes: [seq_len, num_heads, head_dim]
+    # cos and sin shapes: [1, 1, seq_len, head_dim]
+
+    # Reshape cos and sin to [seq_len, num_heads, head_dim] by unsqueezing and broadcasting
+    cos = cos.squeeze().unsqueeze(1) # Add dimensions for broadcasting
+    sin = sin.squeeze().unsqueeze(1)
+    
+    if q.shape[0] == 1:
+        cos = cos.transpose(1, 0).unsqueeze(1)
+        sin = sin.transpose(1, 0).unsqueeze(1)
+
+    # Broadcast to match q and k shapes
+    cos = cos.expand_as(q)
+    sin = sin.expand_as(q)
+
+    # Apply rotary embeddings
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+
+    return q_embed, k_embed
 
 class BitLinear(nn.Module):
     def __init__(self, in_features, out_features):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = nn.Parameter(torch.randn(in_features, out_features))  # Change here
+        self.weight = nn.Parameter(torch.randn(out_features, in_features))  # Changed order
         self.epsilon = 1e-8
-    
+
     def get_gamma(self, W):
-        n = W.shape[0]
-        m = W.shape[1]
-        gamma = (1 / (n * m)) * torch.sum(torch.abs(W))
-        return gamma
-    
-    def round_clip(self, x, a, b):
-        return torch.clamp(torch.round(x), a, b)
-    
-    def clip_weights(self, W, gamma):
-        W_s = W / (gamma + self.epsilon)
-        W_hat = self.round_clip(W_s, -1, 1)
-        return W_hat
+        return torch.mean(torch.abs(W))
 
     def forward(self, x):
         gamma = self.get_gamma(self.weight)
-        W_hat = self.clip_weights(self.weight, gamma)
-        y = torch.matmul(x, W_hat)
-        return y
+        W_hat = quantize(self.weight, gamma, self.epsilon)
+        return torch.matmul(x, W_hat.t())  # Transposed here
 
 class DecoderBlock(nn.Module):
     def __init__(self, embedding_dim, num_heads, hidden_dim, drop_prob=0.1):
         super().__init__()
-        self.masked_multihead_attn = nn.MultiheadAttention(embedding_dim, num_heads)
-        self.feed_forward = nn.Sequential(
-            nn.Linear(embedding_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(drop_prob),
-            nn.Linear(hidden_dim, embedding_dim),
-            nn.Dropout(drop_prob)
-        )
+        self.self_attn = nn.MultiheadAttention(embedding_dim, num_heads)
+        self.feed_forward = SwiGLU(embedding_dim, hidden_dim)
+        self.norm1 = RMSNorm(embedding_dim)
+        self.norm2 = RMSNorm(embedding_dim)
+        self.dropout = nn.Dropout(drop_prob)
+        self.act_quant = ActivationQuantization(num_bits=8)
+        self.rotary_emb = RotaryEmbedding(embedding_dim // num_heads)
 
     def forward(self, x, attn_mask=None):
+        # Self-attention with rotary embeddings
+        q, k, v = x, x, x
+        seq_len = q.size(0)
+        cos, sin = self.rotary_emb(q, seq_len=seq_len)
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
         if attn_mask is not None:
-            batch_size = x.size(0)
-            attn_mask = attn_mask.unsqueeze(0).expand(batch_size, -1, -1)
+            ext_size = x.size(0)
+            attn_mask = attn_mask.unsqueeze(0).expand(ext_size, -1, -1)
             attn_mask = attn_mask.bool()
             attn_mask = attn_mask[:, :, 0].cuda()
-            attn_output = self.masked_multihead_attn(x, x, x, attn_mask=attn_mask)[0]
-        else:
-            attn_output = self.masked_multihead_attn(x, x, x)[0]
-        out = self.feed_forward(attn_output)
-        return out + x
+        attn_output, _ = self.self_attn(q, k, v, attn_mask=attn_mask)
+        x = self.norm1(x + self.dropout(attn_output))
+        x = self.act_quant(x)
+        
+        # Feed-forward
+        ff_output = self.feed_forward(x)
+        x = self.norm2(x + self.dropout(ff_output))
+        x = self.act_quant(x)
+        
+        return x
 
-    
 class BitNet(nn.Module):
     def __init__(self, vocab_size, embedding_dim, num_layers, num_heads, hidden_dim):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
-        self.pos_encoding = PositionalEncoding(embedding_dim, MAX_SEQ_LENGTH)
         self.decoder = nn.ModuleList([DecoderBlock(embedding_dim, num_heads, hidden_dim) for _ in range(num_layers)])
         self.bitlinear = BitLinear(embedding_dim, vocab_size)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
+
     def forward(self, x, attention_mask):
         x = x.to(self.device)
         x = self.embedding(x)
-        x = self.pos_encoding(x)
 
         for decoder_block in self.decoder:
             x = decoder_block(x, attention_mask)
 
         out = self.bitlinear(x)
         return out
-    
+
+
 def validate(model, val_dataloader, loss_fn):
     model.eval()
     total_val_loss = 0
@@ -142,11 +225,11 @@ def train(model, train_dataloader, val_dataloader, optimizer, loss_fn, epochs):
             if i != 0:
                 avg_loss = total_loss / i
                 if (i + 1) % 5 == 0:
-                    try:
-                        r = generate_text(model, tokenizer, 'The red ')
-                        print(f'{r}\n')
-                    except:
-                        print('Error generating text')
+                    r = generate_text(model, tokenizer, 'The red ')
+                    print(f'{r}\n')
+                    #try:
+                    #except:
+                    #    print('Error generating text')
                 print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_loss:.4f}")
         
         avg_loss = total_loss / len(train_dataloader)
