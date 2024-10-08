@@ -1,3 +1,6 @@
+
+# https://arxiv.org/abs/2410.05258
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
